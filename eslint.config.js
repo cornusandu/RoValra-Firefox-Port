@@ -200,6 +200,7 @@ export default [
                 ...baseRestrictedSyntax,
                 ...apiRestrictedSyntax,
             ],
+            "no-undef": "error",
             'rovalra/check-css-vars': 'warn',
         },
     },

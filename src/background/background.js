@@ -1,4 +1,7 @@
 import { SETTINGS_CONFIG } from '../content/core/settings/settingConfig.js';
+import {} from '../chromemocks.js';
+
+console.warn('started background.js');
 
 // --- Constants & State ---
 

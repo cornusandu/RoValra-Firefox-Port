@@ -1,3 +1,7 @@
+/// <reference types="firefox-webext-browser" />
+
+import {} from '../chromemocks.js';
+
 import { initializeObserver, startObserving } from './core/observer.js';
 import { detectTheme, dispatchThemeEvent } from './core/theme.js';
 // Site wide

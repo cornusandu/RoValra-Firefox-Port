@@ -1,0 +1,193 @@
+diff --git a/eslint.config.js b/eslint.config.js
+index 9244894..8bc7387 100644
+--- a/eslint.config.js
++++ b/eslint.config.js
+@@ -200,6 +200,7 @@ export default [
+                 ...baseRestrictedSyntax,
+                 ...apiRestrictedSyntax,
+             ],
++            "no-undef": "error",
+             'rovalra/check-css-vars': 'warn',
+         },
+     },
+diff --git a/manifest.json b/manifest.json
+index 10d699b..974cb2b 100644
+--- a/manifest.json
++++ b/manifest.json
+@@ -15,10 +15,16 @@
+             "matches": ["*://*.roblox.com/*"],
+             "js": ["content.js"],
+             "css": ["css/sitewide.css", "css/rovalra.css"],
+-            "run_at": "document_start",
++            "run_at": "document_idle",
+             "all_frames": true
+         }
+     ],
++    "browser_specific_settings": {
++      "gecko": {
++        "id": "rovalra@rav4",
++        "strict_min_version": "142.0"
++      }
++    },
+     "permissions": ["declarativeNetRequest", "storage", "scripting"],
+     "host_permissions": [
+         "https://games.roblox.com/*",
+@@ -27,7 +33,10 @@
+         "https://users.roblox.com/*"
+     ],
+     "background": {
+-        "service_worker": "background.js"
++      "scripts": [
++        "background.js"
++      ],
++      "type": "module"
+     },
+     "optional_permissions": ["webNavigation", "contextMenus", "webRequest"],
+     "declarative_net_request": {
+diff --git a/package-lock.json b/package-lock.json
+index a041ac7..7ce97f1 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,19 +1,20 @@
+ {
+     "name": "rovalra",
+-    "version": "2.4.11",
++    "version": "2.4.12.5",
+     "lockfileVersion": 3,
+     "requires": true,
+     "packages": {
+         "": {
+             "name": "rovalra",
+-            "version": "2.4.11",
++            "version": "2.4.12.5",
+             "dependencies": {
+                 "dompurify": "^3.3.2",
+                 "i18next": "25.8.18",
+                 "marked": "^17.0.4",
+-                "roavatar-renderer": "1.2.7"
++                "roavatar-renderer": "1.2.11"
+             },
+             "devDependencies": {
++                "@types/firefox-webext-browser": "^143.0.0",
+                 "esbuild": "^0.27.3",
+                 "eslint": "10.0.2",
+                 "eslint-config-prettier": "^10.1.8",
+@@ -1139,6 +1140,13 @@
+             "dev": true,
+             "license": "MIT"
+         },
++        "node_modules/@types/firefox-webext-browser": {
++            "version": "143.0.0",
++            "resolved": "https://registry.npmjs.org/@types/firefox-webext-browser/-/firefox-webext-browser-143.0.0.tgz",
++            "integrity": "sha512-865dYKMOP0CllFyHmgXV4IQgVL51OSQQCwSoihQ17EwugePKFSAZRc0EI+y7Ly4q7j5KyURlA7LgRpFieO4JOw==",
++            "dev": true,
++            "license": "MIT"
++        },
+         "node_modules/@types/json-schema": {
+             "version": "7.0.15",
+             "resolved": "https://registry.npmjs.org/@types/json-schema/-/json-schema-7.0.15.tgz",
+@@ -3147,9 +3155,9 @@
+             }
+         },
+         "node_modules/roavatar-renderer": {
+-            "version": "1.2.7",
+-            "resolved": "https://registry.npmjs.org/roavatar-renderer/-/roavatar-renderer-1.2.7.tgz",
+-            "integrity": "sha512-cQ95k/cBIefb6Dhocf61HfA3WNKVC2kN5UYjWJLlF6Mn/BFSNASzx81tw+pZqIDKCr9JcZvaaM3k5G45z7m52g==",
++            "version": "1.2.11",
++            "resolved": "https://registry.npmjs.org/roavatar-renderer/-/roavatar-renderer-1.2.11.tgz",
++            "integrity": "sha512-WSB1A2Lp9Dc7oBDi2tZo/NSApxg/mOHY0HfU7ye08NFiEPJ0ishZcC+k8ATmHa88ujOZ8Z7foV6jHBdzOAJNCA==",
+             "license": "GPL-3.0-only",
+             "dependencies": {
+                 "fzstd": "^0.1.1",
+diff --git a/package.json b/package.json
+index 162408e..e2b59a7 100644
+--- a/package.json
++++ b/package.json
+@@ -1,31 +1,32 @@
+ {
+-    "name": "rovalra",
+-    "version": "2.4.12.5",
+-    "description": "An extension aiming to provide features that other Roblox extensions pay wall!",
+-    "private": true,
+-    "scripts": {
+-        "build": "npm run clean && node build.js",
+-        "clean": "rimraf dist",
+-        "lint": "eslint ."
+-    },
+-    "devDependencies": {
+-        "esbuild": "^0.27.3",
+-        "eslint": "10.0.2",
+-        "eslint-config-prettier": "^10.1.8",
+-        "globals": "^17.4.0",
+-        "prettier": "^3.8.1",
+-        "prettier-eslint": "^16.4.2",
+-        "rimraf": "^6.1.3",
+-        "sass": "^1.97.3"
+-    },
+-    "dependencies": {
+-        "dompurify": "^3.3.2",
+-        "i18next": "25.8.18",
+-        "marked": "^17.0.4",
+-        "roavatar-renderer": "1.2.11"
+-    },
+-    "lint-staged": {
+-        "*.js": "eslint --fix",
+-        "*.{js,json,css,md}": "prettier --write"
+-    }
+-}
++  "name": "rovalra",
++  "version": "2.4.12.5",
++  "description": "An extension aiming to provide features that other Roblox extensions pay wall!",
++  "private": true,
++  "scripts": {
++    "build": "npm run clean && node build.js",
++    "clean": "rimraf dist",
++    "lint": "eslint ."
++  },
++  "devDependencies": {
++    "@types/firefox-webext-browser": "^143.0.0",
++    "esbuild": "^0.27.3",
++    "eslint": "10.0.2",
++    "eslint-config-prettier": "^10.1.8",
++    "globals": "^17.4.0",
++    "prettier": "^3.8.1",
++    "prettier-eslint": "^16.4.2",
++    "rimraf": "^6.1.3",
++    "sass": "^1.97.3"
++  },
++  "dependencies": {
++    "dompurify": "^3.3.2",
++    "i18next": "25.8.18",
++    "marked": "^17.0.4",
++    "roavatar-renderer": "1.2.11"
++  },
++  "lint-staged": {
++    "*.js": "eslint --fix",
++    "*.{js,json,css,md}": "prettier --write"
++  }
++}
+\ No newline at end of file
+diff --git a/src/background/background.js b/src/background/background.js
+index 2671332..071237c 100644
+--- a/src/background/background.js
++++ b/src/background/background.js
+@@ -1,4 +1,7 @@
+ import { SETTINGS_CONFIG } from '../content/core/settings/settingConfig.js';
++import {} from '../chromemocks.js';
++
++console.warn('started background.js');
+ 
+ // --- Constants & State ---
+ 
+diff --git a/src/content/index.js b/src/content/index.js
+index 34bdd80..0078d76 100644
+--- a/src/content/index.js
++++ b/src/content/index.js
+@@ -1,3 +1,7 @@
++/// <reference types="firefox-webext-browser" />
++
++import {} from '../chromemocks.js';
++
+ import { initializeObserver, startObserving } from './core/observer.js';
+ import { detectTheme, dispatchThemeEvent } from './core/theme.js';
+ // Site wide
