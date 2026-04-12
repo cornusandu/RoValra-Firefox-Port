@@ -1,4 +1,4 @@
-// TODO: Fix firefox blocking api requests to api.rovalra.com
+// TODO: Fix firefox blocking api requests to api.rovalra.com (move fetch() requests into background.js)
 
 // MOCKS
 const ISDEBUG = false;
