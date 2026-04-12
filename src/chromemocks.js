@@ -156,7 +156,7 @@ globalThis.chrome = proxifyChrome({
                     return tocallback(browser.storage.session.setAccessLevel(accessLevel), cb, () => undefined);
                 else {
                     console.debug("chromemocks.js: environment does not support storage.session.setAccessLevel");
-                    return tocallback(new Promise((r) => r()), cb, undefined);
+                    return tocallback(new Promise((r) => r()), cb, () => undefined);
                 }
             }
         },
@@ -203,21 +203,19 @@ globalThis.chrome = proxifyChrome({
          * @param {Permissions} permissions 
          * @returns 
          */
-        contains: function permissionsContains(permissions) {
+        contains: function permissionsContains(permissions, cb) {
             // full compatibility with chrome, see https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/permissions/contains
-            return browser.permissions.contains(permissions);
+            return tocallback(browser.permissions.contains(permissions), cb);
         }
     },
     declarativeNetRequest: {
         /**
          * @param {UpdateRuleOptions} options
+         * @param {((...any) => void)?} cb
          * @returns {Promise<void>}
          */
-        updateDynamicRules: function updateDynamicRules(options) {
-            return browser.declarativeNetRequest.updateDynamicRules(options);
+        updateDynamicRules: function updateDynamicRules(options, cb) {
+            return tocallback(browser.declarativeNetRequest.updateDynamicRules(options), cb);
         }
-    },
-    webRequest: {
-
     }
 });
