@@ -15,17 +15,17 @@ function proxifyChrome(obj, path = []) {
 
             // unknown property -> return callable proxy
             const fullPath = [...path, prop].join(".");
-            console.error(`Proxy fallback GET: chrome.${fullPath}`, {
+            console.error(`Missing Chrome API: chrome.${fullPath}`, {
                 path,
                 prop,
                 target
             });
-            return proxifyChrome(function () {}, [...path, prop]);
+            return undefined;
         },
 
         apply(target, thisArg, args) {
             const api = path.join(".");
-            console.error(`Missing Chrome API: chrome.${api}`, args);
+            console.error(`COMPAT MISSING API: chrome.${api}`, args);
             return undefined;
         }
   });
@@ -86,6 +86,20 @@ globalThis.chrome = proxifyChrome({
                 });
                 return result;
             }
+        },
+        onStartup: {
+            /**
+             * @param {() => void} callback 
+             */
+            addListener: function onStartupAddListener(callback) {
+                browser.runtime.onStartup.addListener(callback);
+            }
+        },
+        /**
+         * @returns {object}
+         */
+        getManifest: function getManifest() {
+            return browser.runtime.getManifest();
         }
     },
     storage: {
@@ -124,7 +138,11 @@ globalThis.chrome = proxifyChrome({
              * @returns {Promise<void | null>}
              */
             setAccessLevel: async function setAccessLevel(accessLevel) {
-                return await browser.storage.session.setAccessLevel(accessLevel);
+                if (typeof browser.storage.session.setAccessLevel === "function")
+                    return await browser.storage.session.setAccessLevel(accessLevel);
+                else {
+                    console.debug("chromemocks.js: environment does not support storage.session.setAccessLevel");
+                }
             }
         },
         sync: {
@@ -144,5 +162,47 @@ globalThis.chrome = proxifyChrome({
                 browser.storage.onChanged.addListener(listener);
             }
         }
+    },
+    permissions: {
+        onAdded: {
+            /**
+             * @param {(Permissions) => void} callback 
+             * @returns {void}
+             */
+            addListener: function addOnAddedListener(callback) {
+                // full compatibility with chrome, see https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/permissions/onAdded
+                return browser.permissions.onAdded.addListener(callback);
+            }
+        },
+        onRemoved: {
+            /**
+             * @param {(Permissions) => void} callback 
+             * @returns {void}
+             */
+            addListener: function addOnRemovedListener(callback) {
+                // full compatibility with chrome, see https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/permissions/onRemoved
+                return browser.permissions.onRemoved.addListener(callback);
+            }
+        },
+        /**
+         * @param {Permissions} permissions 
+         * @returns 
+         */
+        contains: function permissionsContains(permissions) {
+            // full compatibility with chrome, see https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/permissions/contains
+            return browser.permissions.contains(permissions);
+        }
+    },
+    declarativeNetRequest: {
+        /**
+         * @param {UpdateRuleOptions} options
+         * @returns {Promise<void>}
+         */
+        updateDynamicRules: function updateDynamicRules(options) {
+            return browser.declarativeNetRequest.updateDynamicRules(options);
+        }
+    },
+    webRequest: {
+        
     }
 });
