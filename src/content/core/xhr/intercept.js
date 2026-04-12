@@ -49,10 +49,30 @@
             sessionStorage.getItem('rovalra_settingsPageInfo') !== 'false';
     } catch (e) {}
 
-    document.addEventListener('rovalra-streamer-mode', (e) => {
-        if (typeof e.detail === 'object') {
-            streamerModeEnabled = e.detail.enabled === true;
-            settingsPageInfoEnabled = e.detail.settingsPageInfo !== false;
+    window.postMessage({
+        type: "rovalra-streamer-mode",
+        enabled: true,
+        settingsPageInfo: true
+    }, "*");
+
+    window.addEventListener('rovalra-streamer-mode', (e) => {
+        if (e.detail && typeof e.detail === 'object') {
+            let detail;
+
+            try {
+                detail = structuredClone(e.detail);
+            } catch {
+                console.warn(`rovalra intercept.js: failed to make structuredClone of e.detail, falling back to JSON parsing`);
+                try {
+                    detail = JSON.parse(JSON.stringify(e.detail));
+                } catch {
+                    console.error(`rovalra intercept.js: copying e.detail failed repeatedly`);
+                    detail = null;
+                }
+            }
+
+            streamerModeEnabled = detail.enabled === true;
+            settingsPageInfoEnabled = detail.settingsPageInfo !== false;
         } else {
             streamerModeEnabled = e.detail === true;
         }

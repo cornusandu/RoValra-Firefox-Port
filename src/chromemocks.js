@@ -1,3 +1,5 @@
+// TODO: Fix firefox blocking api requests to api.rovalra.com
+
 // MOCKS
 const ISDEBUG = false;
 
@@ -113,6 +115,9 @@ globalThis.chrome = proxifyChrome({
          */
         getManifest: function getManifest() {
             return browser.runtime.getManifest();
+        },
+        get lastError() {
+            return browser.runtime.lastError !== null ? browser.runtime.lastError : undefined;
         }
     },
     storage: {
