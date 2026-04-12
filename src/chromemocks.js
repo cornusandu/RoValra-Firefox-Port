@@ -31,6 +31,19 @@ function proxifyChrome(obj, path = []) {
   });
 }
 
+function tocallback(promise, callback, mapResult = (x) => x) {
+    if (typeof callback === "function") {
+        promise.then(
+            (result) => callback(mapResult(result)),
+            (error) => {
+                console.error("Chrome compat wrapper async error:", error);
+                callback();
+            }
+        );
+    }
+    return promise;
+}
+
 globalThis.chrome = proxifyChrome({
     runtime: {
         sendMessage: async function sendMessage(data, callback) {
@@ -104,57 +117,59 @@ globalThis.chrome = proxifyChrome({
     },
     storage: {
         local: {
-            set: async function set(data) {
+            set: async function set(data, cb) {
                 if (ISDEBUG)
                     console.debug(`globalThis.storage.local.set call with data=\`${data}\``);
-                await browser.storage.local.set(data);
+                return tocallback(browser.storage.local.set(data), cb, () => undefined);
             },
-            get: async function get(keys) {
+            get: async function get(keys, cb) {
                 if (ISDEBUG)
                     console.debug(`globalThis.storage.local.get call with data=\`${keys}\``);
-                return await browser.storage.local.get(keys);
+                return tocallback(browser.storage.local.get(keys), cb);
             },
             /**
-             * @param {string | string[]} keys 
+             * @param {string | string[]} keys
+             * @param {() => void} cb
              * @returns {Promise<void | null>}
              */
-            remove: async function remove(keys) {
-                return await browser.storage.local.remove(keys);
+            remove: async function remove(keys, cb) {
+                return tocallback(browser.storage.local.remove(keys), cb, () => undefined);
             }
         },
         session: {
-            set: async function set(data) {
+            set: async function set(data, cb) {
                 if (ISDEBUG)
                     console.debug(`globalThis.storage.local.set call with data=\`${data}\``);
-                await browser.storage.session.set(data);
+                return tocallback(browser.storage.session.set(data), cb, () => undefined);
             },
-            get: async function get(keys) {
+            get: async function get(keys, cb) {
                 if (ISDEBUG)
                     console.debug(`globalThis.storage.local.get call with data=\`${keys}\``);
-                return await browser.storage.session.get(keys);
+                return tocallback(browser.storage.session.get(keys), cb);
             },
             /**
              * @param {string} accessLevel 
              * @returns {Promise<void | null>}
              */
-            setAccessLevel: async function setAccessLevel(accessLevel) {
+            setAccessLevel: async function setAccessLevel(accessLevel, cb) {
                 if (typeof browser.storage.session.setAccessLevel === "function")
-                    return await browser.storage.session.setAccessLevel(accessLevel);
+                    return tocallback(browser.storage.session.setAccessLevel(accessLevel), cb, () => undefined);
                 else {
                     console.debug("chromemocks.js: environment does not support storage.session.setAccessLevel");
+                    return tocallback(new Promise((r) => r()), cb, undefined);
                 }
             }
         },
         sync: {
-            set: async function set(data) {
+            set: async function set(data, cb) {
                 if (ISDEBUG)
                     console.debug(`globalThis.storage.local.set call with data=\`${data}\``);
-                await browser.storage.sync.set(data);
+                return tocallback(browser.storage.sync.set(data), cb, () => undefined);
             },
-            get: async function get(keys) {
+            get: async function get(keys, cb) {
                 if (ISDEBUG)
                     console.debug(`globalThis.storage.local.get call with data=\`${keys}\``);
-                return await browser.storage.sync.get(keys);
+                return tocallback(browser.storage.sync.get(keys), cb);
             }
         },
         onChanged: {
@@ -203,6 +218,6 @@ globalThis.chrome = proxifyChrome({
         }
     },
     webRequest: {
-        
+
     }
 });

@@ -1,5 +1,3 @@
-import {} from '../../../chromemocks.js'
-
 (function () {
     'use strict';
 
