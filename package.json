@@ -20,7 +20,7 @@
     "sass": "^1.97.3"
   },
   "dependencies": {
-    "dompurify": "^3.3.2",
+    "dompurify": "^3.4.0",
     "i18next": "25.8.18",
     "marked": "^17.0.4",
     "roavatar-renderer": "1.2.11"
