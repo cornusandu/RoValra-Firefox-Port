@@ -31,7 +31,7 @@
         "*://*.roblox.com/*",
         "https://gamejoin.roblox.com/v1/join-game-instance",
         "https://users.roblox.com/*",
-        "https://apis.rovalra.com/*",
+        "https://apis.rovalra.com/*"
     ],
     "background": {
       "scripts": [

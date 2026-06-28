@@ -10,6 +10,7 @@
   },
   "devDependencies": {
     "@types/firefox-webext-browser": "^143.0.0",
+    "chrome-types": "^0.1.431",
     "esbuild": "^0.27.3",
     "eslint": "10.0.2",
     "eslint-config-prettier": "^10.1.8",
