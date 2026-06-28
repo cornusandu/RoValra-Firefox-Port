@@ -3,14 +3,17 @@ import {
     getAuthenticatedUserId,
     getAuthenticatedUsername,
 } from '../../core/user.js';
-import { checkUserExistence } from './existenceCheck.js';
 
 const STORAGE_KEY = 'rovalra_oauth_verification';
 const OAUTH_PROGRESS_KEY = 'rovalra_oauth_progress';
 const AUTH_GAME_UNIVERSE_IDS = [9765626115, 9797153324, 9858244250];
+const AUTH_FAVORITES_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+const ACTIVE_FALLBACK_PROGRESS_MS = 2 * 60 * 1000;
 
 let fallbackTokenCache = new Map();
 let isFlowProcessing = false;
+let cleanupIntervalId = null;
+let isCleanupRunning = false;
 
 function setCachedFallbackToken(userId, token) {
     if (!userId) return;
@@ -40,30 +43,10 @@ async function shouldForceFallback() {
     });
 }
 
-async function isUnder13() {
-    try {
-        const birthResponse = await callRobloxApi({
-            subdomain: 'users',
-            endpoint: '/v1/birthdate',
-            method: 'GET',
-        });
-        if (birthResponse.ok) {
-            const data = await birthResponse.json();
-            const { birthYear, birthMonth, birthDay } = data;
-            const today = new Date();
-            let age = today.getFullYear() - birthYear;
-            const m = today.getMonth() + 1 - birthMonth;
-            if (m < 0 || (m === 0 && today.getDate() < birthDay)) age--;
-            return age < 13;
-        }
-    } catch (error) {}
-    return false;
-}
-
 export async function shouldUseFallback() {
     const forceFallback = await shouldForceFallback();
     if (forceFallback) return true;
-    return await isUnder13();
+    return false;
 }
 
 export async function getStoredFallback() {
@@ -159,7 +142,7 @@ async function favoriteGame(universeId, isFavorited = true) {
             body: { isFavorited: isFavorited },
         });
         return response.ok;
-    } catch (error) {
+    } catch {
         return false;
     }
 }
@@ -169,6 +152,91 @@ async function unfavoriteAllAuthGames() {
         favoriteGame(universeId, false),
     );
     await Promise.allSettled(promises);
+}
+
+async function isAuthGameFavorited(universeId) {
+    try {
+        const response = await callRobloxApiJson({
+            subdomain: 'games',
+            endpoint: `/v1/games/${universeId}/favorites`,
+            noCache: true,
+            useBackground: true,
+        });
+        return !!response?.isFavorited;
+    } catch {
+        return false;
+    }
+}
+
+async function shouldSkipAuthFavoriteCleanup(userId) {
+    if (isFlowProcessing) return true;
+
+    const progress = await getFallbackProgress();
+    if (!progress || String(progress.data?.userId) !== String(userId)) {
+        return false;
+    }
+
+    const age = Date.now() - (progress.timestamp || 0);
+    return age < ACTIVE_FALLBACK_PROGRESS_MS;
+}
+
+async function cleanupAuthGameFavorites() {
+    if (isCleanupRunning) return;
+
+    const userId = await getAuthenticatedUserId();
+    if (!userId || (await shouldSkipAuthFavoriteCleanup(userId))) return;
+
+    isCleanupRunning = true;
+    try {
+        const results = await Promise.allSettled(
+            AUTH_GAME_UNIVERSE_IDS.map(async (universeId) => {
+                const isFavorited = await isAuthGameFavorited(universeId);
+                if (isFavorited) {
+                    await favoriteGame(universeId, false);
+                }
+            }),
+        );
+
+        const failures = results.filter(
+            (result) => result.status === 'rejected',
+        );
+        if (failures.length) {
+            console.warn(
+                'RoValra: Failed to check some OAuth fallback favorites.',
+                failures,
+            );
+        }
+    } finally {
+        isCleanupRunning = false;
+    }
+}
+
+export function startAuthFavoriteCleanupMonitor() {
+    if (cleanupIntervalId) return;
+
+    setTimeout(cleanupAuthGameFavorites, 30000);
+    cleanupIntervalId = setInterval(
+        cleanupAuthGameFavorites,
+        AUTH_FAVORITES_CLEANUP_INTERVAL_MS,
+    );
+}
+
+function generateUUID() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(
+        /[xy]/g,
+        function (c) {
+            const r = (Math.random() * 16) | 0,
+                v = c == 'x' ? r : (r & 0x3) | 0x8;
+            return v.toString(16);
+        },
+    );
+}
+
+async function sha256(message) {
+    const msgBuffer = new TextEncoder().encode(message);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 async function startFallbackFlow() {
@@ -201,11 +269,8 @@ async function startFallbackFlow() {
             return success;
         }
 
-        const userExists = await checkUserExistence(userId, callRobloxApi);
-        if (!userExists) {
-            isFlowProcessing = false;
-            return false;
-        }
+        const local_secret = generateUUID();
+        const local_secret_hash = await sha256(local_secret);
 
         await unfavoriteAllAuthGames();
 
@@ -214,7 +279,11 @@ async function startFallbackFlow() {
             subdomain: 'apis',
             endpoint: '/v1/auth/fallback/initiate',
             method: 'POST',
-            body: { roblox_user_id: parseInt(userId), username: username },
+            body: {
+                roblox_user_id: parseInt(userId),
+                username: username,
+                local_secret_hash: local_secret_hash,
+            },
             skipAutoAuth: true,
             noCache: true,
         });
@@ -228,11 +297,13 @@ async function startFallbackFlow() {
             return false;
         }
 
-        const { universe_id, challenge } = initiateResponse;
+        const { universe_id, challenge, verification_id } = initiateResponse;
         await saveFallbackProgress('initiated', {
             userId,
             universe_id,
             challenge,
+            verification_id,
+            local_secret,
         });
 
         const favoriteSuccess = await favoriteGame(universe_id, true);
@@ -245,16 +316,24 @@ async function startFallbackFlow() {
             userId,
             universe_id,
             challenge,
+            verification_id,
+            local_secret,
         });
 
         const success = await resumeFallbackFlow(userId, {
             step: 'game_favorited',
-            data: { userId, universe_id, challenge },
+            data: {
+                userId,
+                universe_id,
+                challenge,
+                verification_id,
+                local_secret,
+            },
         });
 
         isFlowProcessing = false;
         return success;
-    } catch (error) {
+    } catch {
         isFlowProcessing = false;
         return false;
     }
@@ -262,7 +341,7 @@ async function startFallbackFlow() {
 
 async function resumeFallbackFlow(userId, progress) {
     const { step, data } = progress;
-    const { universe_id, challenge } = data;
+    const { universe_id, challenge, verification_id, local_secret } = data;
 
     try {
         if (step === 'initiated') {
@@ -272,10 +351,18 @@ async function resumeFallbackFlow(userId, progress) {
                 userId,
                 universe_id,
                 challenge,
+                verification_id,
+                local_secret,
             });
             return await resumeFallbackFlow(userId, {
                 step: 'game_favorited',
-                data: { userId, universe_id, challenge },
+                data: {
+                    userId,
+                    universe_id,
+                    challenge,
+                    verification_id,
+                    local_secret,
+                },
             });
         }
 
@@ -291,6 +378,8 @@ async function resumeFallbackFlow(userId, progress) {
                     body: {
                         roblox_user_id: parseInt(userId),
                         challenge: challenge,
+                        verification_id: verification_id,
+                        local_secret: local_secret,
                     },
                     skipAutoAuth: true,
                     noCache: true,
@@ -324,40 +413,19 @@ async function resumeFallbackFlow(userId, progress) {
             return true;
         }
         return false;
-    } catch (error) {
+    } catch {
         return false;
     }
 }
 
-async function shouldForceOnEveryRefresh() {
-    return new Promise((resolve) => {
-        chrome.storage.local.get(
-            { forceFallbackOnEveryRefresh: false },
-            (settings) => {
-                resolve(!!settings.forceFallbackOnEveryRefresh);
-            },
-        );
-    });
-}
-
 export async function initFallback() {
-    const forceOnRefresh = await shouldForceOnEveryRefresh();
     const forceFallback = await shouldForceFallback();
-
-    if (forceOnRefresh && forceFallback) {
-        if (document.readyState !== 'complete') {
-            await new Promise((resolve) => {
-                window.addEventListener('load', resolve, { once: true });
-            });
-        }
-        await clearFallbackVerification();
-    }
 
     const userId = await getAuthenticatedUserId();
     if (!userId) return null;
 
     const stored = await getStoredFallback();
-    if (stored?.accessToken && !forceOnRefresh) return stored.accessToken;
+    if (stored?.accessToken) return stored.accessToken;
 
     const useFallback = await shouldUseFallback();
     if (useFallback || forceFallback) return await getValidFallbackToken(true);

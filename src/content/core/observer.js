@@ -39,14 +39,32 @@ export function initializeObserver() {
 
         for (const mutation of mutationsList) {
             if (mutation.type === 'attributes') {
-                const listener = attributeListeners.get(mutation.target);
+                let listener = attributeListeners.get(mutation.target);
+
+                if (!listener) {
+                    for (const [
+                        observedElement,
+                        callback,
+                    ] of attributeListeners) {
+                        if (
+                            observedElement !== mutation.target &&
+                            observedElement.contains(mutation.target)
+                        ) {
+                            listener = callback;
+                            break;
+                        }
+                    }
+                }
+
                 if (listener) listener(mutation);
                 continue;
             }
 
             if (mutation.type === 'childList') {
-                const listener = childListListeners.get(mutation.target);
-                if (listener) listener(mutation);
+                const listeners = childListListeners.get(mutation.target);
+                if (listeners) {
+                    for (const listener of listeners) listener(mutation);
+                }
             }
 
             if (mutation.addedNodes.length === 0) continue;
@@ -56,6 +74,15 @@ export function initializeObserver() {
 
                 for (const req of observationRequests) {
                     if (!req.active) continue;
+
+                    if (
+                        req.root !== document &&
+                        req.root !== addedNode &&
+                        !req.root.contains(addedNode) &&
+                        !addedNode.contains(req.root)
+                    ) {
+                        continue;
+                    }
 
                     if (!req.multiple && !req.element) {
                         if (addedNode.matches(req.selector)) {
@@ -98,27 +125,34 @@ export function initializeObserver() {
 }
 
 export const observeElement = (selector, callback, options = {}) => {
+    if (!observerInitialized) startObserving();
+
     const isMultiple = options.multiple || false;
+    const root = options.root || options.scope || document;
 
     const request = {
         selector,
         callback,
         onRemove: options.onRemove,
         multiple: isMultiple,
+        root,
         active: true,
+        disconnect() {
+            this.active = false;
+        },
         ...(isMultiple ? { elements: new Set() } : { element: null }),
     };
     observationRequests.push(request);
 
     if (isMultiple) {
-        document.querySelectorAll(selector).forEach((element) => {
+        root.querySelectorAll(selector).forEach((element) => {
             if (!request.elements.has(element)) {
                 request.elements.add(element);
                 callback(element);
             }
         });
     } else {
-        const existingElement = document.querySelector(selector);
+        const existingElement = root.querySelector(selector);
         if (existingElement && !request.element) {
             request.element = existingElement;
             callback(existingElement);
@@ -128,11 +162,20 @@ export const observeElement = (selector, callback, options = {}) => {
     return request;
 };
 
-export const observeAttributes = (element, callback, attributeFilter = []) => {
+export const observeAttributes = (
+    element,
+    callback,
+    attributeFilter = [],
+    options = {},
+) => {
     if (!observerInitialized) initializeObserver();
 
     attributeListeners.set(element, callback);
-    globalObserver.observe(element, { attributes: true, attributeFilter });
+    globalObserver.observe(element, {
+        attributes: true,
+        attributeFilter,
+        subtree: options.subtree || false,
+    });
 
     return {
         disconnect: () => {
@@ -144,11 +187,22 @@ export const observeAttributes = (element, callback, attributeFilter = []) => {
 export function observeChildren(element, callback) {
     if (!observerInitialized) initializeObserver();
 
-    childListListeners.set(element, callback);
+    let listeners = childListListeners.get(element);
+    if (!listeners) {
+        listeners = new Set();
+        childListListeners.set(element, listeners);
+    }
+    listeners.add(callback);
 
     return {
         disconnect: () => {
-            childListListeners.delete(element);
+            const activeListeners = childListListeners.get(element);
+            if (!activeListeners) return;
+
+            activeListeners.delete(callback);
+            if (activeListeners.size === 0) {
+                childListListeners.delete(element);
+            }
         },
     };
 }
@@ -268,23 +322,25 @@ export function startObserving() {
         return 'failed';
     }
 
-    if (document.body) {
-        globalObserver.observe(document.body, {
-            childList: true,
-            subtree: true,
-        });
-        return 'active';
-    } else {
-        window.addEventListener(
-            'DOMContentLoaded',
-            () => {
-                globalObserver.observe(document.body, {
-                    childList: true,
-                    subtree: true,
-                });
-            },
-            { once: true },
-        );
-        return 'deferred';
-    }
+    const observeBody = () => {
+        if (document.body) {
+            globalObserver.observe(document.body, {
+                childList: true,
+                subtree: true,
+            });
+            return true;
+        }
+        return false;
+    };
+
+    if (observeBody()) return 'active';
+
+    const bodyWatcher = new MutationObserver((_, obs) => {
+        if (observeBody()) {
+            obs.disconnect();
+        }
+    }); // Verified
+    bodyWatcher.observe(document.documentElement, { childList: true });
+
+    return 'waiting-for-body';
 }

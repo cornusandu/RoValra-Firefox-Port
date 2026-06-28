@@ -2,23 +2,30 @@
 
 const STORAGE_KEY = 'rovalra_oauth_verification';
 const OAUTH_PROGRESS_KEY = 'rovalra_oauth_progress';
-const TOKEN_EXPIRATION_BUFFER_MS = 5 * 60 * 1000;
+
 import { callRobloxApi } from '../api.js';
 import { getAuthenticatedUserId } from '../user.js';
 import { shouldUseFallback, getValidFallbackToken } from './fallback.js';
-import { checkUserExistence } from './existenceCheck.js';
+import { getCurrentUserTier } from '../settings/handlesettings.js';
 
 let activeOAuthPromise = null;
 
 export async function init() {
     try {
         console.log('RoValra: Script loaded. Syncing session...');
-        const token = await getValidAccessToken(true);
 
-        if (token) {
-            console.log('RoValra: Session synchronized successfully.');
+        const isDonator = getCurrentUserTier() >= 1;
+        if (isDonator) {
+            const token = await getValidAccessToken(true);
+            if (token) {
+                console.log('RoValra: Session synchronized successfully.');
+            } else {
+                console.log('RoValra: No active session or re-auth required.');
+            }
         } else {
-            console.log('RoValra: No active session or re-auth required.');
+            console.log(
+                'RoValra: Non-donator detected, skipped auto OAuth sync.',
+            );
         }
     } catch (error) {
         console.error('RoValra: Error during script initialization', error);
@@ -44,7 +51,10 @@ async function getOAuthProgress() {
     return storage[OAUTH_PROGRESS_KEY] || null;
 }
 
-export async function getValidAccessToken(forceRefresh = false) {
+export async function getValidAccessToken(
+    forceRefresh = false,
+    lazyForNonDonators = true,
+) {
     const userId = await getAuthenticatedUserId();
     if (!userId) return null;
 
@@ -55,9 +65,37 @@ export async function getValidAccessToken(forceRefresh = false) {
         return await getValidFallbackToken(forceRefresh);
     }
 
+    const isDonator = getCurrentUserTier() >= 1;
+
     const storage = await chrome.storage.local.get(STORAGE_KEY);
     let allVerifications = storage[STORAGE_KEY] || {};
     let storedVerification = allVerifications[userId];
+
+    const isAccountSwitch =
+        Object.keys(allVerifications).length > 0 && !storedVerification;
+
+    const existingProgress = await getOAuthProgress();
+    if (
+        existingProgress?.data?.userId &&
+        String(existingProgress.data.userId) !== String(userId)
+    ) {
+        console.log(
+            'RoValra: OAuth progress belongs to another user. Clearing.',
+        );
+        await clearOAuthProgress();
+    }
+
+    if (
+        !isDonator &&
+        lazyForNonDonators &&
+        !storedVerification &&
+        !isAccountSwitch
+    ) {
+        console.log(
+            'RoValra: Non-donator lazy mode - skipping OAuth generation until explicitly needed.',
+        );
+        return null;
+    }
 
     if (!storedVerification || !storedVerification.accessToken) {
         const success = await startOAuthFlow(true);
@@ -70,7 +108,13 @@ export async function getValidAccessToken(forceRefresh = false) {
         return await getValidFallbackToken(forceRefresh);
     }
 
-    if (storedVerification.robloxId != userId) {
+    if (
+        storedVerification &&
+        String(storedVerification.robloxId) !== String(userId)
+    ) {
+        console.warn(
+            'RoValra: Stored OAuth ID mismatch. Proactively re-authenticating.',
+        );
         const success = await startOAuthFlow(true);
         if (success) {
             const newStorage = await chrome.storage.local.get(STORAGE_KEY);
@@ -89,7 +133,7 @@ export async function getValidAccessToken(forceRefresh = false) {
         const response = await callRobloxApi({
             isRovalraApi: true,
             subdomain: 'apis',
-            endpoint: '/v1/auth/badges',
+            endpoint: '/v1/auth/settings',
             headers: {
                 Authorization: `Bearer ${storedVerification.accessToken}`,
             },
@@ -97,10 +141,14 @@ export async function getValidAccessToken(forceRefresh = false) {
             noCache: true,
         });
 
-        if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
             console.warn(
-                `RoValra: Session invalid (Status ${response.status}). Triggering re-auth...`,
+                `RoValra: Session unauthorized (Status ${response.status}). Triggering re-auth...`,
             );
+            if (!isDonator && lazyForNonDonators) {
+                return null;
+            }
+
             const success = await startOAuthFlow(true);
             if (success) {
                 const updated = await chrome.storage.local.get(STORAGE_KEY);
@@ -135,19 +183,39 @@ async function startOAuthFlow(silent = false) {
 
     if (activeOAuthPromise) return activeOAuthPromise;
 
-    const existingProgress = await getOAuthProgress();
-    if (existingProgress && existingProgress.step) {
-        console.log(
-            'RoValra: Resuming OAuth flow from step:',
-            existingProgress.step,
-        );
-        const success = await resumeOAuthFlow(userId, existingProgress);
-        await clearOAuthProgress();
-        return success;
-    }
-
     activeOAuthPromise = (async () => {
         try {
+            const currentProgress = await getOAuthProgress();
+            const now = Date.now();
+            const elapsed = currentProgress
+                ? now - (currentProgress.timestamp || 0)
+                : Infinity;
+
+            if (
+                currentProgress &&
+                currentProgress.step &&
+                String(currentProgress.data?.userId) === String(userId)
+            ) {
+                if (elapsed < 60000) {
+                    console.log('RoValra: Resuming recent OAuth process...');
+                    const success = await resumeOAuthFlow(
+                        userId,
+                        currentProgress,
+                    );
+                    if (success) return true;
+
+                    console.log(
+                        'RoValra: Resumption attempt failed. Too recent to redo steps.',
+                    );
+                    return false;
+                } else {
+                    console.log(
+                        'RoValra: OAuth flow stale (> 1 min). Restarting.',
+                    );
+                    await clearOAuthProgress();
+                }
+            }
+
             console.log('RoValra: Starting new OAuth flow...');
 
             console.log('RoValra: Checking birthdate...');
@@ -178,12 +246,6 @@ async function startOAuthFlow(silent = false) {
             }
 
             await saveOAuthProgress('birthdate_checked', { userId });
-
-            const userExists = await checkUserExistence(userId, callRobloxApi);
-            if (!userExists) {
-                await clearOAuthProgress();
-                return false;
-            }
 
             await saveOAuthProgress('existence_verified', { userId });
 
@@ -217,99 +279,23 @@ async function startOAuthFlow(silent = false) {
                 if (response.ok) {
                     const authResponse = await response.json();
                     const locationUrl = authResponse.location;
-
-                    if (!locationUrl) {
-                        console.error(
-                            'RoValra: OAuth authorization response did not contain a location URL.',
-                            authResponse,
-                        );
-                        await clearOAuthProgress();
-                        return false;
-                    }
-
-                    console.log(
-                        'RoValra: Got authorization code. Fetching token from callback URL...',
-                    );
+                    if (!locationUrl) return false;
 
                     await saveOAuthProgress('got_auth_code', {
                         userId,
                         locationUrl,
                     });
-
-                    const tokenResponse = await callRobloxApi({
-                        fullUrl: locationUrl,
-                        method: 'GET',
-                        isRovalraApi: true,
+                    return await resumeOAuthFlow(userId, {
+                        step: 'got_auth_code',
+                        data: { userId, locationUrl },
                     });
-
-                    if (!tokenResponse.ok) {
-                        console.error(
-                            'RoValra: Failed to get token from callback URL.',
-                            await tokenResponse.text(),
-                        );
-                        await clearOAuthProgress();
-                        return false;
-                    }
-
-                    const tokenData = await tokenResponse.json();
-
-                    if (
-                        tokenData.status === 'success' &&
-                        tokenData.access_token &&
-                        tokenData.user_id &&
-                        tokenData.username
-                    ) {
-                        console.log('RoValra: OAuth Successful!', tokenData);
-
-                        const storage =
-                            await chrome.storage.local.get(STORAGE_KEY);
-                        const allVerifications = storage[STORAGE_KEY] || {};
-
-                        allVerifications[userId] = {
-                            verified: true,
-                            robloxId: tokenData.user_id,
-                            username: tokenData.username,
-                            accessToken: tokenData.access_token,
-                            timestamp: Date.now(),
-                        };
-
-                        await chrome.storage.local.set({
-                            [STORAGE_KEY]: allVerifications,
-                        });
-
-                        await clearOAuthProgress();
-                        return true;
-                    } else {
-                        console.error(
-                            'RoValra: Invalid token data received from backend.',
-                            tokenData,
-                        );
-                        await clearOAuthProgress();
-                        return false;
-                    }
-                } else {
-                    console.error(
-                        'RoValra: OAuth authorization POST request failed with status ' +
-                            response.status,
-                        await response.text(),
-                    );
-                    await clearOAuthProgress();
-                    return false;
                 }
             } catch (error) {
-                console.error(
-                    'RoValra: Error during direct OAuth authorization request.',
-                    error,
-                );
-                await clearOAuthProgress();
+                console.error('RoValra: OAuth authorization error', error);
                 return false;
             }
         } catch (error) {
-            console.error(
-                'RoValra: Error during direct OAuth authorization request.',
-                error,
-            );
-            await clearOAuthProgress();
+            console.error('RoValra: OAuth flow failure', error);
             return false;
         }
     })();
@@ -324,16 +310,66 @@ async function startOAuthFlow(silent = false) {
 async function resumeOAuthFlow(userId, progress) {
     const { step, data } = progress;
 
+    if (data?.userId && String(data.userId) !== String(userId)) {
+        await clearOAuthProgress();
+        return false;
+    }
+
     try {
         if (step === 'birthdate_checked') {
-            const userExists = await checkUserExistence(userId, callRobloxApi);
-            if (!userExists) return false;
-
             await saveOAuthProgress('existence_verified', { userId });
             return await resumeOAuthFlow(userId, {
                 step: 'existence_verified',
                 data: { userId },
             });
+        }
+
+        if (step === 'got_auth_code') {
+            const storage = await chrome.storage.local.get(STORAGE_KEY);
+            if (storage[STORAGE_KEY]?.[userId]?.accessToken) {
+                console.log(
+                    'RoValra: Token already present, clearing progress.',
+                );
+                await clearOAuthProgress();
+                return true;
+            }
+
+            const { locationUrl } = data;
+
+            console.log('RoValra: Resuming token fetch from callback...');
+            const tokenResponse = await callRobloxApi({
+                fullUrl: locationUrl,
+                method: 'GET',
+                isRovalraApi: true,
+                skipAutoAuth: true,
+                noCache: true,
+            });
+
+            if (!tokenResponse.ok) return false;
+
+            const tokenData = await tokenResponse.json();
+            if (
+                tokenData.status === 'success' &&
+                tokenData.access_token &&
+                tokenData.user_id &&
+                tokenData.username
+            ) {
+                const storage = await chrome.storage.local.get(STORAGE_KEY);
+                const allVerifications = storage[STORAGE_KEY] || {};
+                allVerifications[userId] = {
+                    verified: true,
+                    robloxId: tokenData.user_id,
+                    username: tokenData.username,
+                    accessToken: tokenData.access_token,
+                    timestamp: Date.now(),
+                };
+                await chrome.storage.local.set({
+                    [STORAGE_KEY]: allVerifications,
+                });
+                await clearOAuthProgress();
+                return true;
+            }
+            return false;
         }
 
         if (step === 'existence_verified') {
@@ -365,7 +401,6 @@ async function resumeOAuthFlow(userId, progress) {
                 if (!locationUrl) {
                     console.error(
                         'RoValra: OAuth authorization response did not contain a location URL.',
-                        authResponse,
                     );
                     await clearOAuthProgress();
                     return false;
@@ -380,72 +415,20 @@ async function resumeOAuthFlow(userId, progress) {
                     locationUrl,
                 });
 
-                const tokenResponse = await callRobloxApi({
-                    fullUrl: locationUrl,
-                    method: 'GET',
-                    isRovalraApi: true,
+                return await resumeOAuthFlow(userId, {
+                    step: 'got_auth_code',
+                    data: { userId, locationUrl },
                 });
-
-                if (!tokenResponse.ok) {
-                    console.error(
-                        'RoValra: Failed to get token from callback URL.',
-                        await tokenResponse.text(),
-                    );
-                    await clearOAuthProgress();
-                    return false;
-                }
-
-                const tokenData = await tokenResponse.json();
-
-                if (
-                    tokenData.status === 'success' &&
-                    tokenData.access_token &&
-                    tokenData.user_id &&
-                    tokenData.username
-                ) {
-                    console.log(
-                        'RoValra: OAuth Successful (resumed)!',
-                        tokenData,
-                    );
-
-                    const storage = await chrome.storage.local.get(STORAGE_KEY);
-                    const allVerifications = storage[STORAGE_KEY] || {};
-
-                    allVerifications[userId] = {
-                        verified: true,
-                        robloxId: tokenData.user_id,
-                        username: tokenData.username,
-                        accessToken: tokenData.access_token,
-                        timestamp: Date.now(),
-                    };
-
-                    await chrome.storage.local.set({
-                        [STORAGE_KEY]: allVerifications,
-                    });
-
-                    await clearOAuthProgress();
-                    return true;
-                } else {
-                    console.error(
-                        'RoValra: Invalid token data received from backend.',
-                        tokenData,
-                    );
-                    await clearOAuthProgress();
-                    return false;
-                }
             } else {
                 console.error(
                     'RoValra: OAuth authorization POST request failed with status ' +
                         response.status,
-                    await response.text(),
                 );
-                await clearOAuthProgress();
                 return false;
             }
         }
 
         console.warn('RoValra: Unknown OAuth progress step:', step);
-        await clearOAuthProgress();
         return false;
     } catch (error) {
         console.error('RoValra: Error resuming OAuth flow:', error);

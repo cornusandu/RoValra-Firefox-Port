@@ -11,6 +11,7 @@ import { addTooltip } from '../../core/ui/tooltip.js';
 import { RISK_COLORS } from '../../core/trade/riskCalculator.js';
 
 let featureSettings = { itemTradingEnabled: true, tradeRiskEnabled: true };
+let isInitialized = false;
 
 function createRow(label, contentHtml) {
     const row = document.createElement('div');
@@ -21,6 +22,18 @@ function createRow(label, contentHtml) {
     `; //Verified
     // Should never display text
     return row;
+}
+
+function isBundlePage() {
+    return window.location.pathname.includes('/bundles/');
+}
+
+function getRolimonsUrl(assetId) {
+    return `https://www.rolimons.com/${isBundlePage() ? 'bundle' : 'item'}/${assetId}`;
+}
+
+function getRolimonsTooltip() {
+    return `Open ${isBundlePage() ? 'bundle' : 'item'} on Rolimons`;
 }
 
 function updateInfo(parent, referenceElement, assetId) {
@@ -39,7 +52,7 @@ function updateInfo(parent, referenceElement, assetId) {
         <span style="display: flex; align-items: center;">
             <img src="${assets.rolimonsIcon}" style="width: 16px; height: 16px; margin-right: 6px;">
             ${value.toLocaleString()}
-            <a href="https://www.rolimons.com/item/${assetId}" target="_blank" style="display: flex; align-items: center; margin-left: 8px;" class="rovalra-rolimons-link">
+            <a href="${getRolimonsUrl(assetId)}" target="_blank" style="display: flex; align-items: center; margin-left: 8px;" class="rovalra-rolimons-link">
                 <div style="width: 16px; height: 16px; background-color: var(--rovalra-main-text-color); -webkit-mask: url('${
                     assets.launchIcon
                 }') center/contain no-repeat; mask: url('${
@@ -51,7 +64,7 @@ function updateInfo(parent, referenceElement, assetId) {
     const valueRow = createRow('Value', valueHtml);
     const rolimonsLink = valueRow.querySelector('.rovalra-rolimons-link');
     if (rolimonsLink) {
-        addTooltip(rolimonsLink, 'Open item on Rolimons', { position: 'top' });
+        addTooltip(rolimonsLink, getRolimonsTooltip(), { position: 'top' });
     }
     rows.push(valueRow);
 
@@ -139,7 +152,7 @@ function updateItemName(header, assetId) {
     });
 
     const rolimonsLink = document.createElement('a');
-    rolimonsLink.href = `https://www.rolimons.com/item/${assetId}`;
+    rolimonsLink.href = getRolimonsUrl(assetId);
     rolimonsLink.target = '_blank';
     rolimonsLink.style.display = 'flex';
     rolimonsLink.style.alignItems = 'center';
@@ -154,7 +167,7 @@ function updateItemName(header, assetId) {
     });
 
     rolimonsLink.appendChild(rolIcon);
-    addTooltip(rolimonsLink, 'Open item on Rolimons', { position: 'top' });
+    addTooltip(rolimonsLink, getRolimonsTooltip(), { position: 'top' });
     container.appendChild(rolimonsLink);
 
     if (data) {
@@ -184,10 +197,13 @@ export function init() {
             featureSettings = settings;
             if (!settings.itemTradingEnabled) return;
 
-            const assetId = getPlaceIdFromUrl();
-            if (!assetId) return;
+            if (isInitialized) return;
+            isInitialized = true;
 
             const handleUpdate = () => {
+                const assetId = getPlaceIdFromUrl();
+                if (!assetId) return;
+
                 const priceRow = document.querySelector(
                     '#item-details .price-row-container',
                 );
@@ -203,7 +219,9 @@ export function init() {
             };
 
             document.addEventListener('rovalra-rolimons-data-update', (e) => {
+                const assetId = getPlaceIdFromUrl();
                 if (
+                    assetId &&
                     Array.isArray(e.detail) &&
                     e.detail.includes(String(assetId))
                 ) {
@@ -212,7 +230,9 @@ export function init() {
             });
 
             document.addEventListener('rovalra-risk-data-update', (e) => {
+                const assetId = getPlaceIdFromUrl();
                 if (
+                    assetId &&
                     Array.isArray(e.detail) &&
                     e.detail.includes(String(assetId))
                 ) {
@@ -223,8 +243,12 @@ export function init() {
             observeElement(
                 '#item-details .price-row-container',
                 (priceRow) => {
-                    if (priceRow.dataset.rovalraTradingProcessed) return;
-                    priceRow.dataset.rovalraTradingProcessed = 'true';
+                    const assetId = getPlaceIdFromUrl();
+                    if (!assetId) return;
+
+                    if (priceRow.dataset.rovalraTradingProcessed === assetId)
+                        return;
+                    priceRow.dataset.rovalraTradingProcessed = assetId;
 
                     const parent = priceRow.parentNode;
 
@@ -246,6 +270,9 @@ export function init() {
             );
 
             observeElement('.item-details-name-row h1', (header) => {
+                const assetId = getPlaceIdFromUrl();
+                if (!assetId) return;
+
                 updateItemName(header, assetId);
                 const rolimonsData = getCachedRolimonsItem(assetId);
                 if (!rolimonsData) {

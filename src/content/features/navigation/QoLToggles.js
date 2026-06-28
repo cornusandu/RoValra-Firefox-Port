@@ -5,6 +5,30 @@ import { createRadioButton } from '../../core/ui/general/radio.js';
 import { callRobloxApi } from '../../core/api.js';
 import { t } from '../../core/locale/i18n.js';
 
+function appendInlineControl(row, control) {
+    const textWrapper = row.querySelector('.text-truncate-split.flex.flex-col');
+    if (!textWrapper) return;
+
+    Object.assign(textWrapper.style, {
+        alignItems: 'center',
+        display: 'flex',
+        flexDirection: 'row',
+        gap: '12px',
+        justifyContent: 'space-between',
+        width: '100%',
+    });
+
+    const title = textWrapper.querySelector('.foundation-web-menu-item-title');
+    if (title) {
+        Object.assign(title.style, {
+            flex: '1 1 auto',
+            minWidth: '0',
+        });
+    }
+
+    textWrapper.appendChild(control);
+}
+
 export function init() {
     chrome.storage.local.get({ qolTogglesEnabled: true }, async (settings) => {
         if (!settings.qolTogglesEnabled) {
@@ -49,6 +73,8 @@ export function init() {
         const tMap = {
             onlineStatus: await t('qolToggles.onlineStatus'),
             joinStatus: await t('qolToggles.joinStatus'),
+            privateServerPrivacy: await t('qolToggles.privateServerPrivacy'),
+            inventoryVisibility: await t('qolToggles.inventoryVisibility'),
             everyone: await t('qolToggles.everyone'),
             friendsFollowingAndFollowers: await t(
                 'qolToggles.friendsFollowingAndFollowers',
@@ -60,6 +86,8 @@ export function init() {
 
         let currentOnlineStatus = 'AllUsers';
         let currentJoinStatus = 'AllUsers';
+        let currentPrivateServerPrivacy = 'AllUsers';
+        let currentInventoryVisibility = 'AllUsers';
         try {
             const response = await callRobloxApi({
                 subdomain: 'apis',
@@ -76,6 +104,14 @@ export function init() {
                     currentJoinStatus =
                         data.whoCanJoinMeInExperiences.currentValue;
                 }
+                if (data.privateServerPrivacy?.currentValue) {
+                    currentPrivateServerPrivacy =
+                        data.privateServerPrivacy.currentValue;
+                }
+                if (data.whoCanSeeMyInventory?.currentValue) {
+                    currentInventoryVisibility =
+                        data.whoCanSeeMyInventory.currentValue;
+                }
             }
         } catch (e) {
             console.warn('RoValra: Failed to fetch online status', e);
@@ -91,6 +127,8 @@ export function init() {
         const labelMap = {
             onlineStatus: tMap.onlineStatus,
             joinStatus: tMap.joinStatus,
+            privateServerPrivacy: tMap.privateServerPrivacy,
+            inventoryVisibility: tMap.inventoryVisibility,
         };
 
         const menu = createDropdownMenu({
@@ -100,14 +138,25 @@ export function init() {
                     label: labelMap['onlineStatus'],
                     value: 'onlineStatus',
                 },
-                { label: labelMap['joinStatus'], value: 'joinStatus' },
+                {
+                    label: labelMap['joinStatus'],
+                    value: 'joinStatus',
+                },
+                {
+                    label: labelMap['privateServerPrivacy'],
+                    value: 'privateServerPrivacy',
+                },
+                {
+                    label: labelMap['inventoryVisibility'],
+                    value: 'inventoryVisibility',
+                },
             ],
             onValueChange: () => {},
             position: 'center',
         });
 
         menu.panel.style.transform = 'translateX(-50%)';
-        menu.panel.style.setProperty('min-width', '200px', 'important');
+        menu.panel.style.setProperty('min-width', '320px', 'important');
 
         const updatePosition = () => {
             if (button.offsetWidth > 0) {
@@ -133,65 +182,63 @@ export function init() {
                 div.appendChild(btn.firstChild);
             }
 
-            if (value === 'onlineStatus' || value === 'joinStatus') {
+            if (
+                value === 'onlineStatus' ||
+                value === 'joinStatus' ||
+                value === 'privateServerPrivacy' ||
+                value === 'inventoryVisibility'
+            ) {
                 const isOnlineStatus = value === 'onlineStatus';
+                const isJoinStatus = value === 'joinStatus';
+                const isPrivateServer = value === 'privateServerPrivacy';
+                const isInventoryVisibility = value === 'inventoryVisibility';
+
                 const statusOptions = [
                     {
                         label: tMap.everyone,
-                        value: isOnlineStatus ? 'AllUsers' : 'All',
+                        value: isJoinStatus ? 'All' : 'AllUsers',
                     },
                     {
                         label: tMap.friendsFollowingAndFollowers,
-                        value: isOnlineStatus
-                            ? 'FriendsFollowingAndFollowers'
-                            : 'Followers',
+                        value: isJoinStatus
+                            ? 'Followers'
+                            : 'FriendsFollowingAndFollowers',
                     },
                     {
                         label: tMap.friendsAndFollowing,
-                        value: isOnlineStatus
-                            ? 'FriendsAndFollowing'
-                            : 'Following',
+                        value: isJoinStatus
+                            ? 'Following'
+                            : 'FriendsAndFollowing',
                     },
                     { label: tMap.friends, value: 'Friends' },
                     { label: tMap.noOne, value: 'NoOne' },
                 ];
 
-                let initialValue = isOnlineStatus
-                    ? currentOnlineStatus
-                    : currentJoinStatus;
+                let initialValue;
+                if (isOnlineStatus) initialValue = currentOnlineStatus;
+                else if (isJoinStatus) initialValue = currentJoinStatus;
+                else if (isPrivateServer)
+                    initialValue = currentPrivateServerPrivacy;
+                else if (isInventoryVisibility)
+                    initialValue = currentInventoryVisibility;
 
                 const { element: statusDropdown, setValue } = createDropdown({
                     items: statusOptions,
                     initialValue: initialValue,
-                    onValueChange: (newValue) => {
-                        const payload = isOnlineStatus
-                            ? { whoCanSeeMyOnlineStatus: newValue }
-                            : {
-                                  whoCanJoinMeInExperiences: newValue,
-                              };
-
-                        callRobloxApi({
-                            subdomain: 'apis',
-                            endpoint: '/user-settings-api/v1/user-settings',
-                            method: 'POST',
-                            body: payload,
-                        }).catch((e) =>
-                            console.error('Failed to update status', e),
-                        );
-
-                        const onlineDropdownEl = document.getElementById(
-                            'rovalra-qol-onlineStatus-dropdown',
-                        );
-                        const joinDropdownEl = document.getElementById(
-                            'rovalra-qol-joinStatus-dropdown',
-                        );
+                    onValueChange: async (newValue) => {
+                        let payload;
 
                         if (isOnlineStatus) {
+                            payload = { whoCanSeeMyOnlineStatus: newValue };
                             currentOnlineStatus = newValue;
+
                             const onlineLevel =
                                 permissionLevels[currentOnlineStatus];
                             const joinLevel =
                                 permissionLevels[currentJoinStatus];
+                            const joinDropdownEl = document.getElementById(
+                                'rovalra-qol-joinStatus-dropdown',
+                            );
 
                             if (onlineLevel < joinLevel) {
                                 const newJoinValue =
@@ -200,11 +247,7 @@ export function init() {
                                     joinDropdownEl &&
                                     joinDropdownEl.rovalraSetValue
                                 ) {
-                                    joinDropdownEl.rovalraSetValue(
-                                        newJoinValue,
-                                    );
-                                    currentJoinStatus = newJoinValue;
-                                    callRobloxApi({
+                                    await callRobloxApi({
                                         subdomain: 'apis',
                                         endpoint:
                                             '/user-settings-api/v1/user-settings',
@@ -219,15 +262,23 @@ export function init() {
                                             e,
                                         ),
                                     );
+                                    joinDropdownEl.rovalraSetValue(
+                                        newJoinValue,
+                                    );
+                                    currentJoinStatus = newJoinValue;
                                 }
                             }
-                        } else {
-                            // isJoinStatus
+                        } else if (isJoinStatus) {
+                            payload = { whoCanJoinMeInExperiences: newValue };
                             currentJoinStatus = newValue;
+
                             const joinLevel =
                                 permissionLevels[currentJoinStatus];
                             const onlineLevel =
                                 permissionLevels[currentOnlineStatus];
+                            const onlineDropdownEl = document.getElementById(
+                                'rovalra-qol-onlineStatus-dropdown',
+                            );
 
                             if (joinLevel > onlineLevel) {
                                 const newOnlineValue =
@@ -236,11 +287,7 @@ export function init() {
                                     onlineDropdownEl &&
                                     onlineDropdownEl.rovalraSetValue
                                 ) {
-                                    onlineDropdownEl.rovalraSetValue(
-                                        newOnlineValue,
-                                    );
-                                    currentOnlineStatus = newOnlineValue;
-                                    callRobloxApi({
+                                    await callRobloxApi({
                                         subdomain: 'apis',
                                         endpoint:
                                             '/user-settings-api/v1/user-settings',
@@ -255,39 +302,28 @@ export function init() {
                                             e,
                                         ),
                                     );
+                                    onlineDropdownEl.rovalraSetValue(
+                                        newOnlineValue,
+                                    );
+                                    currentOnlineStatus = newOnlineValue;
                                 }
                             }
+                        } else if (isPrivateServer) {
+                            payload = { privateServerPrivacy: newValue };
+                            currentPrivateServerPrivacy = newValue;
+                        } else if (isInventoryVisibility) {
+                            payload = { whoCanSeeMyInventory: newValue };
+                            currentInventoryVisibility = newValue;
                         }
-                        if (
-                            isOnlineStatus &&
-                            newValue === 'NoOne' &&
-                            joinDropdownEl &&
-                            joinDropdownEl.rovalraSetValue
-                        ) {
-                            const joinDropdownEl = document.getElementById(
-                                'rovalra-qol-joinStatus-dropdown',
-                            );
-                            if (
-                                joinDropdownEl &&
-                                joinDropdownEl.rovalraSetValue
-                            ) {
-                                joinDropdownEl.rovalraSetValue('NoOne');
-                                callRobloxApi({
-                                    subdomain: 'apis',
-                                    endpoint:
-                                        '/user-settings-api/v1/user-settings',
-                                    method: 'POST',
-                                    body: {
-                                        whoCanJoinMeInExperiences: 'NoOne',
-                                    },
-                                }).catch((e) =>
-                                    console.error(
-                                        'Failed to update join status',
-                                        e,
-                                    ),
-                                );
-                            }
-                        }
+
+                        callRobloxApi({
+                            subdomain: 'apis',
+                            endpoint: '/user-settings-api/v1/user-settings',
+                            method: 'POST',
+                            body: payload,
+                        }).catch((e) =>
+                            console.error('Failed to update status', e),
+                        );
                     },
                 });
 
@@ -311,10 +347,7 @@ export function init() {
                     trigger.style.minWidth = '100%';
                 }
 
-                const textWrapper = div.querySelector(
-                    '.text-truncate-split.flex.flex-col',
-                );
-                if (textWrapper) textWrapper.appendChild(statusDropdown);
+                appendInlineControl(div, statusDropdown);
             } else {
                 const radio = createRadioButton({
                     id: `rovalra-qol-${value}`,
@@ -325,10 +358,7 @@ export function init() {
                 });
                 radio.style.marginLeft = 'auto';
 
-                const textWrapper = div.querySelector(
-                    '.text-truncate-split.flex.flex-col',
-                );
-                if (textWrapper) textWrapper.appendChild(radio);
+                appendInlineControl(div, radio);
 
                 div.addEventListener('click', () => {
                     const currentChecked =

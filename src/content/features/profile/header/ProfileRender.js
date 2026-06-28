@@ -1,4 +1,8 @@
-import { observeElement, observeResize } from '../../../core/observer.js';
+import {
+    observeElement,
+    observeResize,
+    observeChildren,
+} from '../../../core/observer.js';
 import { getUserIdFromUrl } from '../../../core/idExtractor.js';
 import {
     injectStylesheet,
@@ -10,21 +14,20 @@ import { createOverlay } from '../../../core/ui/overlay.js';
 import { createDropdown } from '../../../core/ui/dropdown.js';
 import { addTooltip } from '../../../core/ui/tooltip.js';
 import { createToggle } from '../../../core/ui/general/toggle.js';
+import { createStyledInput } from '../../../core/ui/catalog/input.js';
 import { showConfirmationPrompt } from '../../../core/ui/confirmationPrompt.js';
 import { getAuthenticatedUserId } from '../../../core/user.js';
 import { getAssets } from '../../../core/assets.js';
 import { SETTINGS_CONFIG } from '../../../core/settings/settingConfig.js';
 import {
     handleSaveSettings,
-    syncDonatorTier,
     getCurrentUserTier,
 } from '../../../core/settings/handlesettings.js';
 import {
-    getUserDescription,
-    updateUserDescription,
+    getUserSettings,
     updateUserSettingViaApi,
-} from '../../../core/profile/descriptionhandler.js';
-import { getUserSettings } from '../../../core/donators/settingHandler.js';
+} from '../../../core/donators/settingHandler.js';
+import { migrateLegacyEnvironment } from '../../../core/profile/descriptionhandler.js';
 import {
     RegisterWrappers,
     RBXRenderer,
@@ -42,10 +45,13 @@ import {
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as THREE from 'three';
 import { safeHtml } from '../../../core/packages/dompurify.js';
+import {backgroundRendererRequests} from '../../../core/utils/renderer.js'
 FLAGS.ENABLE_API_MESH_CACHE = false;
 FLAGS.ENABLE_API_RBX_CACHE = false;
 FLAGS.USE_WORKERS = false;
 FLAGS.ONLINE_ASSETS = true;
+
+backgroundRendererRequests()
 
 let currentRig = null;
 let currentRigType = null;
@@ -53,11 +59,14 @@ let emoteStopTimer = null;
 let preloadedCanvas = null;
 let isPreloading = false;
 let globalAvatarData = null;
+let customModelInstance = null;
 let avatarDataPromise = null;
 let isCustomEnvLoaded = false;
 let environmentConfig = null;
 let activeEmoteId = null;
 const animationSpeed = 1;
+const EFFECT_BLACK_KEY_THRESHOLD = 0.08;
+const EFFECT_BLACK_KEY_SOFTNESS = 0.02;
 
 let isAnimatePatched = false;
 const raycaster = new THREE.Raycaster();
@@ -71,6 +80,62 @@ let isRenderingPaused = false;
 let currentDirectTrack = null;
 let directEmoteTimer = null;
 let hasMovedCamera = false;
+let activeProfileRenderUserId = null;
+let profileRenderObserversSetup = false;
+let removeRoblox3dObserver = null;
+let renderContainerObserver = null;
+let autoSwitchObserver = null;
+let animationLoopStarted = false;
+let autoSwitchedProfileUserId = null;
+const resizeObserversByContainer = new WeakMap();
+const blackKeyedEffectMaterials = new WeakSet();
+
+function isRoavatarEffectMaterial(material) {
+    return (
+        material?.isShaderMaterial &&
+        typeof material.fragmentShader === 'string' &&
+        material.fragmentShader.includes('uniform sampler2D uAlphaMap') &&
+        material.fragmentShader.includes('varying vec3 vInstanceColor')
+    );
+}
+
+function keyBlackFromEffectMaterial(material) {
+    if (
+        blackKeyedEffectMaterials.has(material) ||
+        !isRoavatarEffectMaterial(material)
+    ) {
+        return;
+    }
+
+    material.fragmentShader = material.fragmentShader.replace(
+        'gl_FragColor = finalColor;',
+        `
+    float blackKeyValue = max(max(finalColor.r, finalColor.g), finalColor.b);
+    finalColor.a *= smoothstep(
+        ${EFFECT_BLACK_KEY_SOFTNESS.toFixed(3)},
+        ${EFFECT_BLACK_KEY_THRESHOLD.toFixed(3)},
+        blackKeyValue
+    );
+    if (finalColor.a <= 0.001) discard;
+
+    gl_FragColor = finalColor;`,
+    );
+    material.needsUpdate = true;
+    blackKeyedEffectMaterials.add(material);
+}
+
+function keyBlackFromEffectMaterials() {
+    const scene = RBXRenderer.getScene?.();
+    if (!scene) return;
+
+    scene.traverse((object) => {
+        const materials = Array.isArray(object.material)
+            ? object.material
+            : [object.material];
+
+        materials.forEach(keyBlackFromEffectMaterial);
+    });
+}
 
 function constrainCamera() {
     const controls = RBXRenderer.getRendererControls();
@@ -196,27 +261,35 @@ function updateCameraSystem() {
         recenterBtnRef.style.display = hasMovedCamera ? 'flex' : 'none';
     }
 }
+function customAnimate() {
+    const controls = RBXRenderer.getRendererControls();
+    const camera = RBXRenderer.getRendererCamera();
+
+    if (controls && camera) {
+        updateCameraSystem();
+        controls.update();
+    }
+
+    let [width, height] = RBXRenderer.resolution;
+    RBXRenderer.camera.aspect = width / height;
+    RBXRenderer.camera.updateProjectionMatrix();
+
+    RBXRenderer.renderer.setRenderTarget(null);
+    keyBlackFromEffectMaterials();
+    if (RBXRenderer.effectComposer) {
+        RBXRenderer.effectComposer.render();
+    } else {
+        RBXRenderer.renderer.render(RBXRenderer.scene, RBXRenderer.camera);
+    }
+
+    requestAnimationFrame(() => {
+        customAnimate();
+    });
+}
 function patchAnimateForRotation() {
     if (isAnimatePatched) return;
 
-    RBXRenderer.animate = function () {
-        const controls = RBXRenderer.getRendererControls();
-        const camera = RBXRenderer.getRendererCamera();
-
-        if (controls && camera) {
-            updateCameraSystem();
-            controls.update();
-        }
-
-        RBXRenderer.renderer.setRenderTarget(null);
-        if (RBXRenderer.effectComposer) {
-            RBXRenderer.effectComposer.render();
-        } else {
-            RBXRenderer.renderer.render(RBXRenderer.scene, RBXRenderer.camera);
-        }
-
-        requestAnimationFrame(() => RBXRenderer.animate());
-    };
+    RBXRenderer.animateAll = customAnimate;
     isAnimatePatched = true;
 }
 function getAnimatorW(rig = currentRig) {
@@ -294,6 +367,7 @@ async function loadRig(rigType) {
                 if (currentRig) {
                     currentRig.Destroy();
                 }
+
                 currentRig = newRig;
 
                 await playIdle();
@@ -494,12 +568,513 @@ async function createEmoteRadialMenu(emotesData, onSelect) {
     return container;
 }
 
-function injectCustomButtons(toggleButton) {
+function openEnvironmentCreatorOverlay() {
+    chrome.storage.local.get(null, (settings) => {
+        const contentContainer = document.createElement('div');
+        Object.assign(contentContainer.style, {
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '24px',
+            padding: '10px',
+            maxHeight: '70vh',
+            overflowY: 'auto',
+        });
+
+        const createSection = (title) => {
+            const section = document.createElement('div');
+            section.style.marginBottom = '4px';
+            const header = document.createElement('div');
+            header.className = 'text-label-small';
+            header.style.cssText =
+                'margin-bottom:12px; color:var(--rovalra-secondary-text-color); font-weight:bold; border-bottom: 1px solid var(--rovalra-border-color); padding-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;';
+            header.textContent = title;
+            const itemsContainer = document.createElement('div');
+            itemsContainer.style.cssText =
+                'display:flex; flex-direction:column; gap:10px;';
+            section.appendChild(header);
+            section.appendChild(itemsContainer);
+            contentContainer.appendChild(section);
+            return itemsContainer;
+        };
+
+        const createInput = (label, key, placeholder = '', type = 'text') => {
+            const { container: row, input } = createStyledInput({
+                id: `creator-${key}`,
+                label: label,
+                value: settings[key] || '',
+                placeholder: placeholder,
+            });
+            input.type = type;
+            input.addEventListener('input', async (e) => {
+                const val = e.target.value;
+                await chrome.storage.local.set({ [key]: val });
+                updateLive();
+            });
+            return row;
+        };
+
+        const createToggleRow = (label, key) => {
+            const row = document.createElement('div');
+            row.style.cssText =
+                'display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;';
+            const labelEl = document.createElement('span');
+            labelEl.textContent = label;
+            labelEl.className = 'text-label-small';
+            const toggle = createToggle({
+                checked: !!settings[key],
+                onChange: async (checked) => {
+                    await chrome.storage.local.set({ [key]: checked });
+                    settings[key] = checked;
+                    updateLive();
+                },
+            });
+            row.append(labelEl, toggle);
+            return row;
+        };
+
+        const createColorRow = (label, key) => {
+            const row = document.createElement('div');
+            row.style.cssText =
+                'display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;';
+            const labelEl = document.createElement('span');
+            labelEl.textContent = label;
+            labelEl.className = 'text-label-small';
+            const input = document.createElement('input');
+            input.type = 'color';
+            input.value = settings[key] || '#ffffff';
+            input.style.cssText =
+                'border:none; width:30px; height:30px; cursor:pointer; background:none;';
+            input.oninput = async (e) => {
+                await chrome.storage.local.set({ [key]: e.target.value });
+                updateLive();
+            };
+            row.append(labelEl, input);
+            return row;
+        };
+
+        const updateLive = () => {
+            chrome.storage.local.get(null, (current) => {
+                const config = {
+                    model: {
+                        url: current.modelUrl,
+                        position: [
+                            parseFloat(current.modelPosX) || 0,
+                            parseFloat(current.modelPosY) || 0,
+                            parseFloat(current.modelPosZ) || 0,
+                        ],
+                        scale: [
+                            parseFloat(current.modelScaleX) || 1,
+                            parseFloat(current.modelScaleY) || 1,
+                            parseFloat(current.modelScaleZ) || 1,
+                        ],
+                        castShadow: !!current.modelCastShadow,
+                        receiveShadow: !!current.modelReceiveShadow,
+                    },
+                    atmosphere: {
+                        background: current.bgColor || null,
+                        showFloor: !!current.showFloor,
+                        lights: [],
+                        skybox: current.skyboxToggle
+                            ? [
+                                  current.skyboxPx,
+                                  current.skyboxNx,
+                                  current.skyboxPy,
+                                  current.skyboxNy,
+                                  current.skyboxPz,
+                                  current.skyboxNz,
+                              ]
+                            : null,
+                        fog: current.fogToggle
+                            ? {
+                                  color: current.fogColor,
+                                  near: parseFloat(current.fogNear) || 0,
+                                  far: parseFloat(current.fogFar) || 120,
+                              }
+                            : null,
+                    },
+                    camera: { far: parseFloat(current.cameraFar) || 100 },
+                };
+
+                if (current.ambientLightToggle) {
+                    config.atmosphere.lights.push({
+                        type: 'AmbientLight',
+                        color: current.ambientLightColor,
+                        intensity:
+                            parseFloat(current.ambientLightIntensity) || 0,
+                    });
+                }
+                if (current.dirLightToggle) {
+                    config.atmosphere.lights.push({
+                        type: 'DirectionalLight',
+                        color: current.dirLightColor,
+                        intensity: parseFloat(current.dirLightIntensity) || 0,
+                        position: [
+                            parseFloat(current.dirLightPosX) || 0,
+                            parseFloat(current.dirLightPosY) || 0,
+                            parseFloat(current.dirLightPosZ) || 0,
+                        ],
+                        castShadow: !!current.dirLightCastShadow,
+                    });
+                }
+
+                const scene = RBXRenderer.getScene();
+                setupAtmosphere(scene, config.atmosphere, !!config.model.url);
+                if (config.model.url) {
+                    loadCustomEnvironment(scene, config.model);
+                } else if (customModelInstance) {
+                    scene.remove(customModelInstance);
+                    customModelInstance = null;
+                }
+
+                const camera = RBXRenderer.getRendererCamera();
+                if (camera) {
+                    camera.far = config.camera.far;
+                    camera.updateProjectionMatrix();
+                }
+            });
+        };
+
+        const modelSec = createSection('GLB Model');
+        modelSec.appendChild(
+            createInput('URL / Path', 'modelUrl', 'assets/... or https://...'),
+        );
+        const posRow = document.createElement('div');
+        posRow.style.cssText =
+            'display:grid; grid-template-columns: 1fr 1fr 1fr; gap:5px;';
+        posRow.append(
+            createInput('Pos X', 'modelPosX'),
+            createInput('Pos Y', 'modelPosY'),
+            createInput('Pos Z', 'modelPosZ'),
+        );
+        modelSec.appendChild(posRow);
+        const scaleRow = document.createElement('div');
+        scaleRow.style.cssText =
+            'display:grid; grid-template-columns: 1fr 1fr 1fr; gap:5px;';
+        scaleRow.append(
+            createInput('Scale X', 'modelScaleX'),
+            createInput('Scale Y', 'modelScaleY'),
+            createInput('Scale Z', 'modelScaleZ'),
+        );
+        modelSec.appendChild(scaleRow);
+        modelSec.appendChild(createToggleRow('Cast Shadow', 'modelCastShadow'));
+        modelSec.appendChild(
+            createToggleRow('Receive Shadow', 'modelReceiveShadow'),
+        );
+
+        const atmosphereSec = createSection('Atmosphere');
+        atmosphereSec.appendChild(
+            createColorRow('Background Color', 'bgColor'),
+        );
+        atmosphereSec.appendChild(createToggleRow('Show Floor', 'showFloor'));
+        atmosphereSec.appendChild(createInput('Camera Far', 'cameraFar'));
+
+        const ambientSec = createSection('Ambient Light');
+        ambientSec.appendChild(createToggleRow('Enable', 'ambientLightToggle'));
+        ambientSec.appendChild(createColorRow('Color', 'ambientLightColor'));
+        ambientSec.appendChild(
+            createInput('Intensity', 'ambientLightIntensity'),
+        );
+
+        const dirSec = createSection('Directional Light');
+        dirSec.appendChild(createToggleRow('Enable', 'dirLightToggle'));
+        dirSec.appendChild(createColorRow('Color', 'dirLightColor'));
+        dirSec.appendChild(createInput('Intensity', 'dirLightIntensity'));
+        const dirPosRow = document.createElement('div');
+        dirPosRow.style.cssText =
+            'display:grid; grid-template-columns: 1fr 1fr 1fr; gap:5px;';
+        dirPosRow.append(
+            createInput('X', 'dirLightPosX'),
+            createInput('Y', 'dirLightPosY'),
+            createInput('Z', 'dirLightPosZ'),
+        );
+        dirSec.appendChild(dirPosRow);
+        dirSec.appendChild(
+            createToggleRow('Cast Shadow', 'dirLightCastShadow'),
+        );
+
+        const fogSec = createSection('Fog');
+        fogSec.appendChild(createToggleRow('Enable', 'fogToggle'));
+        fogSec.appendChild(createColorRow('Color', 'fogColor'));
+        fogSec.appendChild(createInput('Near', 'fogNear'));
+        fogSec.appendChild(createInput('Far', 'fogFar'));
+
+        const skyboxSec = createSection('Skybox');
+        skyboxSec.appendChild(createToggleRow('Enable Skybox', 'skyboxToggle'));
+
+        const bulkInputRow = createInput(
+            'Bulk URL Paste',
+            'skyboxBulkInput',
+            'Paste all 6 links here...',
+        );
+        const bulkInput = bulkInputRow.querySelector('input');
+
+        const skyMapping = {
+            _rt: 'skyboxPx',
+            _lf: 'skyboxNx',
+            _up: 'skyboxPy',
+            _dn: 'skyboxNy',
+            _bk: 'skyboxPz',
+            _ft: 'skyboxNz',
+        };
+
+        bulkInput.addEventListener('input', async (e) => {
+            const text = e.target.value;
+            const urls = text
+                .split(/[\s,]+/)
+                .filter((u) => u.trim().startsWith('http'));
+            if (urls.length > 0) {
+                const updates = {};
+                urls.forEach((url) => {
+                    const lower = url.toLowerCase();
+                    for (const suffix in skyMapping) {
+                        if (lower.includes(suffix)) {
+                            updates[skyMapping[suffix]] = url;
+                            break;
+                        }
+                    }
+                });
+                if (Object.keys(updates).length > 0) {
+                    await chrome.storage.local.set(updates);
+                    Object.entries(updates).forEach(([key, val]) => {
+                        const input = contentContainer.querySelector(
+                            `#creator-${key}`,
+                        );
+                        if (input) input.value = val;
+                    });
+                    updateLive();
+                }
+            }
+        });
+
+        const skyHelp = document.createElement('p');
+        skyHelp.className = 'text-description';
+        skyHelp.style.fontSize = '11px';
+        skyHelp.textContent =
+            'Faces are automatically detected if URLs end with: _rt (Right), _lf (Left), _up (Top), _dn (Down), _bk (Back), _ft (Front).';
+        skyboxSec.append(bulkInputRow, skyHelp);
+
+        const skyGrid = document.createElement('div');
+        skyGrid.style.cssText =
+            'display:grid; grid-template-columns: 1fr 1fr; gap:5px; margin-top:10px;';
+        skyGrid.append(
+            createInput('Right (_rt)', 'skyboxPx'),
+            createInput('Left (_lf)', 'skyboxNx'),
+            createInput('Top (_up)', 'skyboxPy'),
+            createInput('Bottom (_dn)', 'skyboxNy'),
+            createInput('Back (_bk)', 'skyboxPz'),
+            createInput('Front (_ft)', 'skyboxNz'),
+        );
+        skyboxSec.appendChild(skyGrid);
+
+        const actionSec = createSection('Actions');
+        const actionBtns = document.createElement('div');
+        actionBtns.style.cssText = 'display:flex; gap:10px;';
+
+        const genBtn = document.createElement('button');
+        genBtn.className = 'btn-secondary-sm';
+        genBtn.textContent = 'Print JSON';
+        genBtn.style.flex = '1';
+        genBtn.onclick = () => {
+            chrome.storage.local.get(null, (data) => {
+                const out = {
+                    model: {
+                        url: data.modelUrl,
+                        position: [
+                            parseFloat(data.modelPosX) || 0,
+                            parseFloat(data.modelPosY) || 0,
+                            parseFloat(data.modelPosZ) || 0,
+                        ],
+                        scale: [
+                            parseFloat(data.modelScaleX) || 1,
+                            parseFloat(data.modelScaleY) || 1,
+                            parseFloat(data.modelScaleZ) || 1,
+                        ],
+                        castShadow: !!data.modelCastShadow,
+                        receiveShadow: !!data.modelReceiveShadow,
+                    },
+                    atmosphere: {
+                        background: data.bgColor || null,
+                        showFloor: !!data.showFloor,
+                        lights: [],
+                        fog: data.fogToggle
+                            ? {
+                                  color: data.fogColor,
+                                  near: parseFloat(data.fogNear) || 0,
+                                  far: parseFloat(data.fogFar) || 120,
+                              }
+                            : null,
+                    },
+                    camera: { far: parseFloat(data.cameraFar) || 100 },
+                };
+                if (data.ambientLightToggle)
+                    out.atmosphere.lights.push({
+                        type: 'AmbientLight',
+                        color: data.ambientLightColor,
+                        intensity: parseFloat(data.ambientLightIntensity) || 0,
+                    });
+                if (data.dirLightToggle)
+                    out.atmosphere.lights.push({
+                        type: 'DirectionalLight',
+                        color: data.dirLightColor,
+                        intensity: parseFloat(data.dirLightIntensity) || 0,
+                        position: [
+                            parseFloat(data.dirLightPosX) || 0,
+                            parseFloat(data.dirLightPosY) || 0,
+                            parseFloat(data.dirLightPosZ) || 0,
+                        ],
+                        castShadow: !!data.dirLightCastShadow,
+                    });
+                console.log(
+                    'RoValra Environment Config:',
+                    JSON.stringify(out, null, 2),
+                );
+                alert('Config printed to console (F12)');
+            });
+        };
+
+        const importBtn = document.createElement('button');
+        importBtn.className = 'btn-secondary-sm';
+        importBtn.textContent = 'Import JSON';
+        importBtn.style.flex = '1';
+        importBtn.onclick = () => {
+            const json = prompt('Paste environment JSON here:');
+            if (!json) return;
+            try {
+                const data = JSON.parse(json);
+                const toSet = {};
+                if (data.model) {
+                    toSet.modelUrl = data.model.url || '';
+                    if (data.model.position)
+                        [toSet.modelPosX, toSet.modelPosY, toSet.modelPosZ] =
+                            data.model.position.map(String);
+                    if (data.model.scale)
+                        [
+                            toSet.modelScaleX,
+                            toSet.modelScaleY,
+                            toSet.modelScaleZ,
+                        ] = data.model.scale.map(String);
+                    toSet.modelCastShadow = !!data.model.castShadow;
+                    toSet.modelReceiveShadow = !!data.model.receiveShadow;
+                }
+                if (data.atmosphere) {
+                    toSet.bgColor = data.atmosphere.background || '';
+                    toSet.showFloor = !!data.atmosphere.showFloor;
+                    toSet.fogToggle = !!data.atmosphere.fog;
+                    if (data.atmosphere.fog) {
+                        toSet.fogColor = data.atmosphere.fog.color;
+                        toSet.fogNear = String(data.atmosphere.fog.near);
+                        toSet.fogFar = String(data.atmosphere.fog.far);
+                    }
+                    const amb = data.atmosphere.lights.find(
+                        (l) => l.type === 'AmbientLight',
+                    );
+                    if (amb) {
+                        toSet.ambientLightToggle = true;
+                        toSet.ambientLightColor = amb.color;
+                        toSet.ambientLightIntensity = String(amb.intensity);
+                    }
+                    const dir = data.atmosphere.lights.find(
+                        (l) => l.type === 'DirectionalLight',
+                    );
+                    if (dir) {
+                        toSet.dirLightToggle = true;
+                        toSet.dirLightColor = dir.color;
+                        toSet.dirLightIntensity = String(dir.intensity);
+                        if (dir.position)
+                            [
+                                toSet.dirLightPosX,
+                                toSet.dirLightPosY,
+                                toSet.dirLightPosZ,
+                            ] = dir.position.map(String);
+                        toSet.dirLightCastShadow = !!dir.castShadow;
+                    }
+                }
+                if (data.camera) toSet.cameraFar = String(data.camera.far);
+                chrome.storage.local.set(toSet, () => location.reload());
+            } catch (e) {
+                alert('Invalid JSON');
+            }
+        };
+
+        const resetBtn = document.createElement('button');
+        resetBtn.className = 'btn-secondary-sm';
+        resetBtn.textContent = 'Reset Defaults';
+        resetBtn.style.flex = '1';
+        resetBtn.style.color = 'var(--rovalra-error-color, #ff4444)';
+        resetBtn.onclick = () => {
+            showConfirmationPrompt({
+                title: 'Reset Environment',
+                message:
+                    'Are you sure you want to reset all Environment Creator settings? This will revert the view to the default void and reload the page.',
+                confirmText: 'Reset',
+                onConfirm: async () => {
+                    const keysToClear = [
+                        'modelUrl',
+                        'modelPosX',
+                        'modelPosY',
+                        'modelPosZ',
+                        'modelScaleX',
+                        'modelScaleY',
+                        'modelScaleZ',
+                        'modelCastShadow',
+                        'modelReceiveShadow',
+                        'bgColor',
+                        'showFloor',
+                        'ambientLightToggle',
+                        'ambientLightColor',
+                        'ambientLightIntensity',
+                        'dirLightToggle',
+                        'dirLightColor',
+                        'dirLightIntensity',
+                        'dirLightPosX',
+                        'dirLightPosY',
+                        'dirLightPosZ',
+                        'dirLightCastShadow',
+                        'fogToggle',
+                        'fogColor',
+                        'fogNear',
+                        'fogFar',
+                        'cameraFar',
+                        'skyboxToggle',
+                        'skyboxPx',
+                        'skyboxNx',
+                        'skyboxPy',
+                        'skyboxNy',
+                        'skyboxPz',
+                        'skyboxNz',
+                        'tooltipToggle',
+                        'tooltipText',
+                        'tooltipLink',
+                        'environmentTester',
+                    ];
+                    await chrome.storage.local.remove(keysToClear);
+                    location.reload();
+                },
+            });
+        };
+
+        actionBtns.append(genBtn, importBtn, resetBtn);
+        actionSec.appendChild(actionBtns);
+
+        createOverlay({
+            title: 'Environment Creator',
+            bodyContent: contentContainer,
+            maxWidth: '500px',
+            showLogo: true,
+        });
+    });
+}
+
+async function injectCustomButtons(toggleButton) {
     if (
         !globalAvatarData ||
         toggleButton.querySelector('.rovalra-custom-controls')
     )
         return;
+
+    const globalSettings = await chrome.storage.local.get([
+        'environmentTester',
+    ]);
 
     const controlsWrapper = document.createElement('div');
     controlsWrapper.className = 'rovalra-custom-controls';
@@ -530,6 +1105,19 @@ function injectCustomButtons(toggleButton) {
     });
     recenterBtnRef = recenterBtn;
     controlsWrapper.appendChild(recenterBtn);
+
+    if (globalSettings.environmentTester) {
+        const envCreatorBtn = createSquareButton({
+            content: 'Env Creator',
+            width: 'auto',
+            fontSize: '12px',
+        });
+        envCreatorBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openEnvironmentCreatorOverlay();
+        });
+        controlsWrapper.appendChild(envCreatorBtn);
+    }
 
     const R6_DEFAULT_EMOTES = [
         { assetId: 128777973, assetName: 'Wave', position: 1, loop: false },
@@ -645,6 +1233,7 @@ function injectCustomButtons(toggleButton) {
                 'swimidle',
                 'toolslash',
                 'toollunge',
+                'mood',
             ];
 
             if (currentRigType === 'R6') {
@@ -758,7 +1347,6 @@ function injectCustomButtons(toggleButton) {
         const settings = await chrome.storage.local.get([
             'profileRenderEnvironment',
             'rendererDeveloperToggles',
-            'profileRenderUseApi',
         ]);
 
         if (isOwnProfile) {
@@ -769,10 +1357,6 @@ function injectCustomButtons(toggleButton) {
                 SETTINGS_CONFIG.Profile.settings.profile3DRenderEnabled
                     .childSettings.profileRenderEnvironment.options;
             const currentEnv = settings.profileRenderEnvironment || 'void';
-            const isDonator = getCurrentUserTier() >= 1;
-            const effectiveCanUseApi =
-                isDonator && settings.profileRenderUseApi;
-
             const { element: envDropdown } = createDropdown({
                 items: profileEnvs,
                 initialValue: currentEnv,
@@ -783,47 +1367,22 @@ function injectCustomButtons(toggleButton) {
                         (opt) => opt.value === value,
                     );
                     const envId = selectedEnv ? selectedEnv.id : 1;
-                    if (effectiveCanUseApi) {
-                        try {
-                            await updateUserSettingViaApi('environment', envId);
-                        } catch (error) {
-                            console.error(
-                                'RoValra: Failed to save environment via API.',
-                                error,
-                            );
-                        }
-                    } else {
-                        const currentDescription =
-                            await getUserDescription(userId);
-                        if (currentDescription !== null) {
-                            let newDescription = currentDescription
-                                .split('\n')
-                                .filter((line) => !line.trim().startsWith('e:'))
-                                .join('\n')
-                                .trim();
-                            if (envId !== 1)
-                                newDescription = newDescription
-                                    ? newDescription + `\n\ne:${envId}`
-                                    : `e:${envId}`;
-                            if (newDescription !== currentDescription)
-                                await updateUserDescription(
-                                    userId,
-                                    newDescription,
-                                );
-                        }
+                    try {
+                        await updateUserSettingViaApi('environment', envId);
+                    } catch (error) {
+                        console.error(
+                            'RoValra: Failed to save environment via API.',
+                            error,
+                        );
                     }
                 },
             });
             envDropdown.style.width = '100%';
             envSection.appendChild(envDropdown);
             const helpText = document.createElement('p');
-            helpText.textContent =
-                'Saves environment choice to your about me as "e:X" so other RoValra users can see it.';
             helpText.style.cssText =
                 'font-size: 11px; color: var(--rovalra-secondary-text-color); margin-top: 5px; margin-bottom: 0;'; //Verified
-            if (!effectiveCanUseApi) {
-                envSection.appendChild(helpText);
-            }
+            envSection.appendChild(helpText);
             contentContainer.appendChild(envSection);
         }
 
@@ -851,6 +1410,7 @@ function injectCustomButtons(toggleButton) {
             });
             skeletonRow.appendChild(label);
             skeletonRow.appendChild(toggle);
+
             devSection.appendChild(skeletonRow);
             contentContainer.appendChild(devSection);
         }
@@ -901,7 +1461,10 @@ function injectCustomButtons(toggleButton) {
 }
 // Rendering loop
 function startAnimationLoop() {
-    const fpsLimit = 45;
+    if (animationLoopStarted) return;
+    animationLoopStarted = true;
+
+    const fpsLimit = 60;
     const interval = 1000 / fpsLimit;
     let lastRenderTime = performance.now();
 
@@ -911,7 +1474,7 @@ function startAnimationLoop() {
 
         const delta = currentTime - lastRenderTime;
         if (delta >= interval) {
-            const deltaTime = (delta / 1000) * animationSpeed;
+            const deltaTime = (1 / fpsLimit) * animationSpeed;
             const animatorW = getAnimatorW();
 
             if (currentDirectTrack) {
@@ -954,60 +1517,65 @@ function startAnimationLoop() {
     };
     requestAnimationFrame(animate);
 }
+let lastLoadedUrl = null;
 async function loadCustomEnvironment(scene, config) {
     if (!config) return;
 
     if (!config.url) {
+        if (customModelInstance) scene.remove(customModelInstance);
+        customModelInstance = null;
+        lastLoadedUrl = null;
         raycastTargets = [];
         isCustomEnvLoaded = true;
         return;
     }
+
+    if (lastLoadedUrl === config.url && customModelInstance) {
+        if (config.position)
+            customModelInstance.position.set(...config.position);
+        if (config.scale) customModelInstance.scale.set(...config.scale);
+        customModelInstance.updateMatrix();
+        return;
+    }
+
     return new Promise((resolve, reject) => {
         const loader = new GLTFLoader();
         let envUrl = config.url;
-
         try {
             new URL(envUrl);
         } catch (e) {
             envUrl = chrome.runtime.getURL(envUrl);
         }
-
         loader.load(
             envUrl,
             async (gltf) => {
-                const model = gltf.scene;
-
+                if (customModelInstance) scene.remove(customModelInstance);
+                customModelInstance = gltf.scene;
+                lastLoadedUrl = config.url;
                 raycastTargets = [];
-
-                if (config.position) model.position.set(...config.position);
-                if (config.scale) model.scale.set(...config.scale);
-
-                model.traverse((node) => {
+                if (config.position)
+                    customModelInstance.position.set(...config.position);
+                if (config.scale)
+                    customModelInstance.scale.set(...config.scale);
+                customModelInstance.traverse((node) => {
                     if (node.isMesh) {
                         node.userData.isEnvironment = true;
-
                         if (config.receiveShadow !== undefined)
                             node.receiveShadow = config.receiveShadow;
                         if (config.castShadow !== undefined)
                             node.castShadow = config.castShadow;
-
                         node.matrixAutoUpdate = false;
                         node.updateMatrix();
-
                         raycastTargets.push(node);
                     }
                 });
-
-                scene.add(model);
-
+                scene.add(customModelInstance);
                 if (RBXRenderer.plane) {
                     RBXRenderer.plane.visible = false;
                 }
-
                 if (RBXRenderer.shadowPlane) {
                     RBXRenderer.shadowPlane.visible = false;
                 }
-
                 isCustomEnvLoaded = true;
                 resolve();
             },
@@ -1025,6 +1593,8 @@ function setupAtmosphere(scene, config, isCustomEnv = false) {
 
     if (config.background) {
         scene.background = new THREE.Color(config.background);
+    } else if (!RBXRenderer.backgroundTransparent) {
+        scene.background = new THREE.Color(RBXRenderer.backgroundColorHex);
     } else {
         scene.background = null;
     }
@@ -1092,15 +1662,75 @@ const DEFAULT_VOID_CONFIG = {
     },
 };
 
-async function preloadAvatar() {
+function resetProfileRenderState() {
+    if (emoteStopTimer) {
+        clearTimeout(emoteStopTimer);
+        emoteStopTimer = null;
+    }
+    if (directEmoteTimer) {
+        clearTimeout(directEmoteTimer);
+        directEmoteTimer = null;
+    }
+    if (currentDirectTrack) {
+        currentDirectTrack.Stop(0);
+        currentDirectTrack = null;
+    }
+    if (currentRig) {
+        currentRig.Destroy();
+        currentRig = null;
+    }
+    if (customModelInstance) {
+        RBXRenderer.getScene()?.remove(customModelInstance);
+        customModelInstance = null;
+    }
+    if (preloadedCanvas) {
+        preloadedCanvas.style.visibility = 'hidden';
+    }
+
+    currentRigType = null;
+    globalAvatarData = null;
+    customModelInstance = null;
+    avatarDataPromise = null;
+    isPreloading = false;
+    isCustomEnvLoaded = false;
+    environmentConfig = null;
+    activeEmoteId = null;
+    recenterBtnRef = null;
+    intendedDistance = 15;
+    lastAppliedDistance = 15;
+    lastCameraPos = new THREE.Vector3();
+    lastTargetPos = new THREE.Vector3();
+    raycastFrameSkip = 0;
+    raycastTargets = [];
+    isRenderingPaused = false;
+    hasMovedCamera = false;
+    autoSwitchedProfileUserId = null;
+    lastLoadedUrl = null;
+}
+
+function getActiveAvatarPromise() {
+    const userId = activeProfileRenderUserId || getUserIdFromUrl();
+    if (!userId) return Promise.resolve(null);
+
+    return preloadAvatar(userId);
+}
+
+async function preloadAvatar(userId = getUserIdFromUrl()) {
+    if (!userId) return null;
+    const requestedUserId = String(userId);
+
+    if (activeProfileRenderUserId !== requestedUserId) {
+        activeProfileRenderUserId = requestedUserId;
+        resetProfileRenderState();
+    }
+
     if (avatarDataPromise) return avatarDataPromise;
 
     avatarDataPromise = (async () => {
         if (isPreloading) return;
         isPreloading = true;
 
-        const userId = getUserIdFromUrl();
-        if (!userId) {
+        if (!requestedUserId) {
             isPreloading = false;
             return null;
         }
@@ -1112,7 +1742,6 @@ async function preloadAvatar() {
                     'profileRenderEnvironment',
                     'profile3DRenderBypassCheck',
                     'environmentTester',
-                    'profileRenderUseApi',
                     'modelUrl',
                     'modelPosX',
                     'modelPosY',
@@ -1152,13 +1781,16 @@ async function preloadAvatar() {
                 ]),
                 callRobloxApiJson({
                     subdomain: 'avatar',
-                    endpoint: `/v2/avatar/users/${userId}/avatar`,
+                    endpoint: `/v2/avatar/users/${requestedUserId}/avatar`,
                 }),
             ]);
+
+            if (activeProfileRenderUserId !== requestedUserId) return null;
 
             globalAvatarData = avatarData;
 
             await new Promise((r) => setTimeout(r, 0));
+            if (activeProfileRenderUserId !== requestedUserId) return null;
 
             if (!preloadedCanvas) {
                 RegisterWrappers();
@@ -1201,6 +1833,8 @@ async function preloadAvatar() {
 
             await new Promise((r) => setTimeout(r, 10));
 
+            if (activeProfileRenderUserId !== requestedUserId) return null;
+
             await loadRig(globalAvatarData.playerAvatarType);
 
             if (preloadedCanvas) {
@@ -1221,7 +1855,8 @@ async function preloadAvatar() {
                 }
 
                 const authUserId = await getAuthenticatedUserId();
-                const isOwnProfile = String(userId) === String(authUserId);
+                const isOwnProfile =
+                    String(requestedUserId) === String(authUserId);
                 const useDevEnvironment = settings.environmentTester;
 
                 if (useDevEnvironment) {
@@ -1285,11 +1920,14 @@ async function preloadAvatar() {
                         SETTINGS_CONFIG.Profile.settings.profile3DRenderEnabled
                             .childSettings.profileRenderEnvironment.options;
                     const { environment: apiEnv } = await getUserSettings(
-                        userId,
+                        requestedUserId,
                         {
                             useDescription: true,
                         },
                     );
+
+                    if (activeProfileRenderUserId !== requestedUserId) return;
+
                     let envIdToRender;
                     if (isOwnProfile) {
                         const profileEnvValue =
@@ -1302,44 +1940,16 @@ async function preloadAvatar() {
                             : 1;
                         envIdToRender = localEnvId;
                         if (localEnvId !== apiEnv) {
-                            const isDonator = getCurrentUserTier() >= 1;
-                            if (isDonator && settings.profileRenderUseApi) {
-                                try {
-                                    await updateUserSettingViaApi(
-                                        'environment',
-                                        localEnvId,
-                                    );
-                                } catch (error) {
-                                    console.error(
-                                        'RoValra: Failed to sync environment to API.',
-                                        error,
-                                    );
-                                }
-                            } else {
-                                const currentDescription =
-                                    await getUserDescription(userId);
-                                if (currentDescription !== null) {
-                                    let newDescription = currentDescription
-                                        .split('\n')
-                                        .filter(
-                                            (line) =>
-                                                !line.trim().startsWith('e:'),
-                                        )
-                                        .join('\n')
-                                        .trim();
-                                    if (localEnvId !== 1) {
-                                        newDescription = newDescription
-                                            ? newDescription +
-                                              `\n\ne:${localEnvId}`
-                                            : `e:${localEnvId}`;
-                                    }
-                                    if (newDescription !== currentDescription) {
-                                        await updateUserDescription(
-                                            userId,
-                                            newDescription,
-                                        );
-                                    }
-                                }
+                            try {
+                                await updateUserSettingViaApi(
+                                    'environment',
+                                    localEnvId,
+                                );
+                            } catch (error) {
+                                console.error(
+                                    'RoValra: Failed to sync environment to API.',
+                                    error,
+                                );
                             }
                         }
                     } else {
@@ -1375,6 +1985,7 @@ async function preloadAvatar() {
 
                 if (isCustomEnvLoaded && environmentConfig.model) {
                     await new Promise((r) => setTimeout(r, 0));
+                    if (activeProfileRenderUserId !== requestedUserId) return;
                     await loadCustomEnvironment(scene, environmentConfig.model);
                 }
 
@@ -1506,27 +2117,41 @@ async function attachPreloadedAvatar(container) {
         position: 'relative',
     });
 
-    const avatarPromise = preloadAvatar();
+    const twoDContainer = document.querySelector(
+        '.thumbnail-holder-position .thumbnail-2d-container',
+    );
+    if (twoDContainer) {
+        twoDContainer.style.display = 'none';
+    }
+
+    const avatarPromise = getActiveAvatarPromise();
 
     avatarPromise.catch((err) => {
         container.innerHTML = '';
         const errorContainer = document.createElement('div');
         errorContainer.style.cssText =
             'display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--rovalra-secondary-text-color); padding: 20px; text-align: center; font-size: 12px;';
-        errorContainer.innerHTML = safeHtml`<span style="font-size: 24px; margin-bottom: 8px;">⚠️</span><div style="font-weight:600; margin-bottom:4px;">3D Renderer Error</div><div>${err.message}</div>`;
+        errorContainer.innerHTML = safeHtml`<span style="font-size: 24px; margin-bottom: 8px;">⚠️</span><div style="font-weight:600; margin-bottom:4px;">3D Renderer Error</div><div>${err.message}</div>`; // Verified
         container.appendChild(errorContainer);
+        if (twoDContainer) {
+            twoDContainer.style.display = '';
+        }
     });
 
     const ensureCanvasAttached = () => {
-        if (preloadedCanvas && !container.contains(preloadedCanvas)) {
-            container.appendChild(preloadedCanvas);
+        if (preloadedCanvas) {
+            if (!container.contains(preloadedCanvas)) {
+                container.appendChild(preloadedCanvas);
+            }
 
-            observeResize(container, () => {
+            resizeObserversByContainer.get(container)?.unobserve();
+            const resizeObserver = observeResize(container, () => {
                 RBXRenderer.setRendererSize(
                     container.clientWidth || 420,
                     container.clientHeight || 420,
                 );
             });
+            resizeObserversByContainer.set(container, resizeObserver);
             return true;
         }
         return false;
@@ -1541,11 +2166,112 @@ async function attachPreloadedAvatar(container) {
     }
 }
 
+function setupProfileRenderObservers() {
+    if (profileRenderObserversSetup) return;
+    profileRenderObserversSetup = true;
+
+    injectStylesheet('css/thumbnailholder.css', 'rovalra-thumbnail-holder-css');
+
+    removeRoblox3dObserver = observeElement(
+        '.thumbnail-holder-position .thumbnail-3d-container > canvas:not(.rovalra-canvas), .thumbnail-holder-position .thumbnail-3d-container > .placeholder-generated-image',
+        (elementToRemove) => {
+            elementToRemove.remove();
+        },
+        { multiple: true },
+    );
+
+    renderContainerObserver = observeElement(
+        '.thumbnail-holder-position .thumbnail-3d-container, .avatar-toggle-button',
+        (element) => {
+            if (element.classList.contains('thumbnail-3d-container')) {
+                attachPreloadedAvatar(element);
+            } else if (element.classList.contains('avatar-toggle-button')) {
+                const updateButtons = () => {
+                    element.querySelectorAll('button').forEach((btn) => {
+                        btn.style.backgroundColor =
+                            'var(--rovalra-container-background-color)';
+                    });
+                };
+                updateButtons();
+                observeChildren(element, updateButtons);
+                getActiveAvatarPromise().then((data) => {
+                    if (data) injectCustomButtons(element);
+                });
+            }
+        },
+        { multiple: true },
+    );
+
+    autoSwitchObserver = observeElement(
+        'button.foundation-web-button',
+        (button) => {
+            if (autoSwitchedProfileUserId === activeProfileRenderUserId) return;
+
+            if (button.textContent.trim() === '3D') {
+                if (
+                    document.querySelector(
+                        '.thumbnail-holder-position .thumbnail-2d-container',
+                    )
+                ) {
+                    button.click();
+                }
+                autoSwitchedProfileUserId = activeProfileRenderUserId;
+            }
+        },
+        { multiple: true },
+    );
+}
+
+function refreshProfileRenderDomForCurrentUser() {
+    document
+        .querySelectorAll('.thumbnail-holder-position .thumbnail-3d-container')
+        .forEach((container) => {
+            delete container.dataset.rovalraRendered;
+            attachPreloadedAvatar(container);
+        });
+
+    document.querySelectorAll('.avatar-toggle-button').forEach((element) => {
+        element.querySelector('.rovalra-custom-controls')?.remove();
+        getActiveAvatarPromise().then((data) => {
+            if (data) injectCustomButtons(element);
+        });
+    });
+}
+
+function teardownProfileRenderObservers() {
+    if (!profileRenderObserversSetup) return;
+
+    removeRoblox3dObserver?.disconnect();
+    renderContainerObserver?.disconnect();
+    autoSwitchObserver?.disconnect();
+    removeRoblox3dObserver = null;
+    renderContainerObserver = null;
+    autoSwitchObserver = null;
+    profileRenderObserversSetup = false;
+    removeStylesheet('rovalra-thumbnail-holder-css');
+}
+
 export function init() {
-    syncDonatorTier();
+    migrateLegacyEnvironment();
+
+    const userId = getUserIdFromUrl();
+    if (!userId) {
+        teardownProfileRenderObservers();
+        activeProfileRenderUserId = null;
+        resetProfileRenderState();
+        return;
+    }
+
+    if (activeProfileRenderUserId !== String(userId)) {
+        activeProfileRenderUserId = String(userId);
+        resetProfileRenderState();
+    }
+
     chrome.storage.local.get(
         { profile3DRenderEnabled: true, profile3DRenderForceDisabled: false },
         (result) => {
+            if (activeProfileRenderUserId !== String(userId)) return;
+
             if (result.profile3DRenderForceDisabled) {
                 try {
                     const canvas = document.createElement('canvas');
@@ -1558,57 +2284,11 @@ export function init() {
             }
 
             if (result.profile3DRenderEnabled) {
-                const avatarPromise = preloadAvatar();
-                injectStylesheet(
-                    'css/thumbnailholder.css',
-                    'rovalra-thumbnail-holder-css',
-                );
-
-                observeElement(
-                    '.thumbnail-holder-position .thumbnail-3d-container > canvas:not(.rovalra-canvas), .thumbnail-holder-position .thumbnail-3d-container > .placeholder-generated-image',
-                    (elementToRemove) => {
-                        elementToRemove.remove();
-                    },
-                    { multiple: true },
-                );
-
-                observeElement(
-                    '.thumbnail-holder-position .thumbnail-3d-container, .avatar-toggle-button',
-                    (element) => {
-                        if (
-                            element.classList.contains('thumbnail-3d-container')
-                        ) {
-                            attachPreloadedAvatar(element);
-                        } else if (
-                            element.classList.contains('avatar-toggle-button')
-                        ) {
-                            avatarPromise.then((data) => {
-                                if (data) injectCustomButtons(element);
-                            });
-                        }
-                    },
-                    { multiple: true },
-                );
-
-                let hasAutoSwitchedTo3D = false;
-                observeElement(
-                    'button.foundation-web-button',
-                    (button) => {
-                        if (hasAutoSwitchedTo3D) return;
-
-                        if (button.textContent.trim() === '3D') {
-                            if (
-                                document.querySelector(
-                                    '.thumbnail-holder-position .thumbnail-2d-container',
-                                )
-                            ) {
-                                button.click();
-                            }
-                            hasAutoSwitchedTo3D = true;
-                        }
-                    },
-                    { multiple: true },
-                );
+                setupProfileRenderObservers();
+                refreshProfileRenderDomForCurrentUser();
+            } else {
+                teardownProfileRenderObservers();
+                resetProfileRenderState();
             }
         },
     );

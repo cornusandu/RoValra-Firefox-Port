@@ -5,6 +5,18 @@ import {
 } from '../../thumbnail/thumbnails';
 import { callRobloxApiJson } from '../../api';
 import { getAssets } from '../../assets';
+import { settings } from '../../settings/getSettings.js';
+import {
+    attachSubplaceCardToPresenceTarget,
+    clearSubplaceCardFromPresenceTarget,
+} from './subplaceCard.js';
+
+async function isSubplaceHoverCardEnabled() {
+    return (
+        (await settings.currentlyPlayingSubplaceEnabled) !== false &&
+        (await settings.currentlyPlayingSubplaceHomeEnabled) !== false
+    );
+}
 
 const presenceQueue = {
     pendingIds: new Set(),
@@ -74,7 +86,12 @@ const PRESENCE_MAP = {
     3: { class: 'studio icon-studio', title: 'Studio' },
 };
 
-export function updateUserCardPresence(card, presenceType, gameName) {
+export function updateUserCardPresence(
+    card,
+    presenceType,
+    gameName,
+    presenceData = null,
+) {
     const presence = PRESENCE_MAP[presenceType] || PRESENCE_MAP[0];
     const presenceTitle =
         presenceType === 2 && gameName ? gameName : presence.title;
@@ -85,9 +102,19 @@ export function updateUserCardPresence(card, presenceType, gameName) {
     }
     const sublabel = card.querySelector('.user-card-subname');
     if (sublabel) {
+        clearSubplaceCardFromPresenceTarget(sublabel);
         if (gameName) {
             sublabel.textContent = gameName;
             sublabel.style.fontSize = '9.6px';
+        }
+        if (presenceType === 2 && gameName && presenceData) {
+            isSubplaceHoverCardEnabled()
+                .then((enabled) => {
+                    if (enabled && sublabel.isConnected) {
+                        attachSubplaceCardToPresenceTarget(sublabel, presenceData);
+                    }
+                })
+                .catch(() => {});
         }
     }
 }
@@ -100,7 +127,7 @@ export async function updateFriendTilePresence(card, userId) {
         presenceType === 2 && presence.lastLocation
             ? presence.lastLocation
             : null;
-    updateUserCardPresence(card, presenceType, gameName);
+    updateUserCardPresence(card, presenceType, gameName, presence);
 }
 
 export async function batchFetchPresence(userIds) {
@@ -126,6 +153,9 @@ export function createUserCard({
     presenceInfo = 0,
     gameName,
     isVerified = false,
+    isOpaque = false,
+    hidePresence = false,
+    presenceData = null,
 }) {
     const presence = PRESENCE_MAP[presenceInfo] || PRESENCE_MAP[0];
     const showSublabel = showUsername && gameName ? true : showUsername;
@@ -139,14 +169,18 @@ export function createUserCard({
         : '';
 
     const tileContainer = document.createElement('div');
-    tileContainer.className = 'user-card';
+    tileContainer.className = 'friends-carousel-tile';
     const innerHtml = `
-        <div class="user-card-content" style="width: 90px;">
-            <div class="avatar avatar-card-fullbody" style="width: 90px; height: 90px; position: relative;">
+        <div class="user-card user-card-content rovalra-user-card" style="width: 90px; ${isOpaque ? 'background: var(--rovalra-container-background-color) !important; opacity: 1 !important; border-radius: 50%;' : ''}">
+            <div class="avatar avatar-card-fullbody avatar-card-image-container user-profile-header-details-avatar-container rovalra-user-card-avatar" style="width: 90px; height: 90px; position: relative;">
                 ${href ? `<a href="${href}" class="avatar-card-link">` : ''}
-                    <span class="thumbnail-2d-container avatar-card-image" style="width: 100%; height: 100%; display: block; overflow: hidden; border-radius: 50%; background: var(--rovalra-button-background-color);"></span>
+                    <span class="thumbnail-2d-container avatar-card-image rovalra-user-card-thumbnail" style="width: 100%; height: 100%; display: block; overflow: hidden; border-radius: 50%; background: var(--rovalra-button-background-color);"></span>
                 ${href ? `</a>` : ''}
-                <div class="avatar-status"><span data-testid="presence-icon" title="${presenceTitle}" class="${presence.class}"></span></div>
+                ${
+                    !hidePresence
+                        ? `<div class="avatar-status" style="width: 28px !important; height: 28px !important; max-width: 28px !important; max-height: 28px !important; min-width: 28px !important; min-height: 28px !important; overflow: hidden !important; display: block !important;"><span data-testid="presence-icon" title="${presenceTitle}" class="${presence.class}" style="width: 28px !important; height: 28px !important; display: block !important; transform: scale(1) !important; zoom: 1 !important; font-size: 28px !important;"></span></div>`
+                        : ''
+                }
             </div>
             ${
                 showSublabel
@@ -176,21 +210,33 @@ export function createUserCard({
         height: '90px',
     });
     tileContainer.querySelector('.avatar-card-image').appendChild(thumbEl);
-    const card = tileContainer.firstElementChild;
-    card.style.cursor = href ? 'pointer' : 'default';
-    card.addEventListener('mouseenter', () => {
-        const nameSpan = card.querySelector('.user-card-name span');
+    tileContainer.style.cursor = href ? 'pointer' : 'default';
+    tileContainer.addEventListener('mouseenter', () => {
+        const nameSpan = tileContainer.querySelector('.user-card-name span');
         if (nameSpan) nameSpan.style.textDecoration = 'underline';
-        const subname = card.querySelector('.user-card-subname');
+        const subname = tileContainer.querySelector('.user-card-subname');
         if (subname) subname.style.textDecoration = 'underline';
     });
-    card.addEventListener('mouseleave', () => {
-        const nameSpan = card.querySelector('.user-card-name span');
+    tileContainer.addEventListener('mouseleave', () => {
+        const nameSpan = tileContainer.querySelector('.user-card-name span');
         if (nameSpan) nameSpan.style.textDecoration = 'none';
-        const subname = card.querySelector('.user-card-subname');
+        const subname = tileContainer.querySelector('.user-card-subname');
         if (subname) subname.style.textDecoration = 'none';
     });
-    return card;
+
+    if (presenceInfo === 2 && gameName && presenceData) {
+        const sublabel = tileContainer.querySelector('.user-card-subname');
+        if (sublabel) {
+            isSubplaceHoverCardEnabled()
+                .then((enabled) => {
+                    if (enabled && sublabel.isConnected) {
+                        attachSubplaceCardToPresenceTarget(sublabel, presenceData);
+                    }
+                })
+                .catch(() => {});
+        }
+    }
+    return tileContainer;
 }
 
 export function createFriendTile(
@@ -246,7 +292,7 @@ export function createFriendTile(
                 presenceType === 2 && presence.lastLocation
                     ? presence.lastLocation
                     : null;
-            updateUserCardPresence(card, presenceType, gameName);
+            updateUserCardPresence(card, presenceType, gameName, presence);
         });
     }
 
@@ -304,6 +350,7 @@ export async function createFriendTiles(
                 : `https://www.roblox.com/users/${item.id}/profile`,
             presenceInfo: presenceType,
             gameName: isHidden || !gameName ? '' : gameName,
+            presenceData: isHidden ? null : presence,
         });
         containerEl.appendChild(card);
     }
@@ -379,6 +426,7 @@ export async function createUserCardsFromIds(containerEl, ids, limit = 7) {
             href: `https://www.roblox.com/users/${id}/profile`,
             presenceInfo: presenceType,
             gameName,
+            presenceData: presence,
         });
         containerEl.appendChild(card);
     }
