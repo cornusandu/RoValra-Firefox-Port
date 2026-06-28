@@ -2,6 +2,22 @@
 
 import {} from '../chromemocks.js';
 
+const oldFetch = globalThis.fetch.bind(globalThis);
+
+globalThis.fetch = async function newFetch(input, init) {
+    const target = input instanceof Request ? input.url : input.toString();
+
+    const serialised = await browser.runtime.sendMessage({
+        rovid: "rovalra-mkapi",
+        data: {
+            target: target,
+            args: init ?? {},
+        },
+    });
+
+    return deserialiseAPIResponse(serialised);
+}
+
 import { initializeObserver, startObserving } from './core/observer.js';
 import { detectTheme, dispatchThemeEvent } from './core/theme.js';
 import { getValidAccessToken } from './core/oauth/oauth.js';
@@ -155,6 +171,7 @@ import { init as initCreateDownload } from './features/create.roblox.com/downloa
 import { init as initCatalogExplorer } from './features/catalog/explorer.js';
 import { enforceSettingOverrides } from './core/settings/handlesettings.js';
 import { refreshRemoteSettingLocks } from './core/settings/remoteSettingLocks.js';
+import { deserialiseAPIResponse } from '../Shared/Net/SerialiseAPI.js';
 
 let pageLoaded = false;
 let lastPath = window.location.pathname.toLowerCase();

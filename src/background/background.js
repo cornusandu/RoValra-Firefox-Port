@@ -1,6 +1,8 @@
 import { SETTINGS_CONFIG } from '../content/core/settings/settingConfig.js';
-import {} from '../chromemocks.js';
 import init from './settingsCompat.ts';
+
+import {} from '../chromemocks.js';
+import {} from './sub/net/mkApi.ts';
 
 console.warn('started background.js');
 
