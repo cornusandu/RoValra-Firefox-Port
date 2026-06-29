@@ -394,7 +394,7 @@
         }
     }
 
-    const originalFetch = window.fetch;
+    const originalFetch = window.fetch.bind(window);
     window.fetch = async function (...args) {
         const [url] = args;
         const requestUrl = getRequestUrl(url);

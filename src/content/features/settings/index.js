@@ -2844,7 +2844,7 @@ window.addEventListener('beforeunload', () => {
 });
 
 function initializeHeartbeatSpoofer() {
-    const originalFetch = window.fetch;
+    const originalFetch = window.fetch.bind(window);
     let pulseInterval = null;
     let spoofingMode = 'off';
 

@@ -9,7 +9,7 @@ import {
 export function backgroundRendererRequests() {
     //make all roavatar requests have a prefix
     FLAGS.API_REQUEST_PREFIX = '*^~roavatar-intercept~^*';
-    const originalFetch = window.fetch;
+    const originalFetch = window.fetch.bind(window);
     /**
      * 
      * @param {Request | URL} resource 
