@@ -5,6 +5,8 @@ const ISDEBUG = false;
 
 console.info("Setting up chrome api mocks");
 
+class ValidationError extends Error {};
+
 function proxifyChrome(obj, path = []) {
     return new Proxy(obj, {
         get(target, prop) {
@@ -42,6 +44,11 @@ function tocallback(promise, callback, mapResult = (x) => x) {
                 callback();
             }
         );
+    } else {
+        if (callback !== undefined) {
+            err = new ValidationError("Chrome Mocks: tocallback(callback): Failed to meet expected type.")
+            console.error(ValidationError, { 'type': typeof callback });
+        }
     }
     return promise;
 }
