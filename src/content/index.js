@@ -2,9 +2,9 @@
 
 import {} from '../chromemocks.js';
 
-const oldFetch = globalThis.fetch.bind(globalThis);
+const oldFetch = window.fetch.bind(window);
 
-globalThis.fetch = async function newFetch(input, init) {
+window.fetch = async function newFetch(input, init) {
     const target = input instanceof Request ? input.url : input.toString();
 
     const serialised = await browser.runtime.sendMessage({
