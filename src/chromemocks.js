@@ -169,9 +169,11 @@ globalThis.chrome = proxifyChrome({
              * @returns {Promise<void | null>}
              */
             setAccessLevel: async function setAccessLevel(accessLevel, cb) {
-                if (typeof browser.storage.session.setAccessLevel === "function")
-                    return tocallback(browser.storage.session.setAccessLevel(accessLevel), cb, () => undefined);
-                else {
+                if (typeof browser.storage.session.setAccessLevel === "function") {
+                    if (!browser?.storage?.session?.setAccessLevel)
+                        console.error(`browser?.storage?.session?.setAccessLevel = ${browser?.storage?.session?.setAccessLevel}`);
+                    return tocallback(browser.storage.session.setAccessLevel(accessLevel.accessLevel), cb, () => undefined);
+                } else {
                     console.debug("chromemocks.js: environment does not support storage.session.setAccessLevel");
                     return tocallback(new Promise((r) => r()), cb, () => undefined);
                 }
