@@ -3,6 +3,7 @@ import {
     observeElement,
     observeIntersection,
     observeResize,
+    observeAttributes,
 } from '../../../core/observer.js';
 import {
     fetchThumbnails,
@@ -11,6 +12,7 @@ import {
 import { getAuthenticatedUserId } from '../../../core/user.js';
 import { formatPlayerCount } from '../../../core/games/playerCount.js';
 import { safeHtml } from '../../../core/packages/dompurify.js';
+import { getUserSettings } from '../../../core/donators/settingHandler.js';
 import {
     performJoinAction,
     getSavedPreferredRegion,
@@ -23,6 +25,7 @@ import { getFullRegionName, getRegionData } from '../../../core/regions.js';
 import { createScrollButtons } from '../../../core/ui/general/scrollButtons.js';
 import { showConfirmationPrompt } from '../../../core/ui/confirmationPrompt.js';
 import { t, ts } from '../../../core/locale/i18n.js';
+import { applyBorderToContainer } from '../../profile/avatarBorder.js';
 
 let lastSearchedQuery = '';
 let userSearchAbortController = null;
@@ -31,8 +34,12 @@ const userCache = new Map();
 const assets = getAssets();
 const STORAGE_KEY = 'rovalra_search_history';
 const MAX_HISTORY = 50;
+const quickSearchCosmeticsPromises = new Map();
 let initialSearchValue = '';
 let searchHistoryRenderVersion = 0;
+let selectedIndex = 0;
+let activeQuickSearchRequest = null;
+let latestCommittedQuickSearchRequest = null;
 
 const debounce = (func, delay) => {
     let timeout;
@@ -46,12 +53,138 @@ let cachedFriendsData = null;
 let friendsFetchPromise = null;
 let cachedUserId = null;
 
+function createQuickSearchRequest(query) {
+    return {
+        query,
+        userResult: null,
+        gameResult: null,
+        friendResults: [],
+        userDone: false,
+        gameDone: !searchSettings.gameSearchEnabled || query.length < 2,
+        committed: false,
+    };
+}
+
+function isCurrentSearchRequest(request, signal = null) {
+    return (
+        request &&
+        !signal?.aborted &&
+        (activeQuickSearchRequest === request ||
+            latestCommittedQuickSearchRequest === request)
+    );
+}
+
+function setSearchResult(request, key, value) {
+    if (!request) return;
+
+    if (request.committed) {
+        if (key === 'userResult') window._lastRoValraUserResult = value;
+        if (key === 'gameResult') window._lastRoValraGameResult = value;
+        if (key === 'friendResults') window._lastRoValraFriendResults = value;
+        return;
+    }
+
+    request[key] = value;
+}
+
+function getSearchResult(request, key) {
+    if (!request) return null;
+
+    if (request.committed) {
+        if (key === 'userResult') return window._lastRoValraUserResult;
+        if (key === 'gameResult') return window._lastRoValraGameResult;
+        if (key === 'friendResults') return window._lastRoValraFriendResults;
+    }
+
+    return request[key];
+}
+
+function filterFriendResults(request, userId) {
+    const friendResults = getSearchResult(request, 'friendResults');
+    if (!friendResults) return;
+
+    setSearchResult(
+        request,
+        'friendResults',
+        friendResults.filter((el) => el.dataset.userId != userId),
+    );
+}
+
+function commitQuickSearchRequest(request) {
+    if (!request || activeQuickSearchRequest !== request) return;
+    if (!request.userDone || !request.gameDone) return;
+
+    latestCommittedQuickSearchRequest = request;
+    activeQuickSearchRequest = null;
+    request.committed = true;
+
+    window._lastRoValraUserResult = request.userResult;
+    window._lastRoValraGameResult = request.gameResult;
+    window._lastRoValraFriendResults = request.friendResults;
+
+    selectedIndex = 0;
+    injectIntoMenu(true);
+}
+
+function hasExternalSearchItems() {
+    const menu = document.querySelector('ul.new-dropdown-menu');
+    if (!menu) return false;
+    const items = menu.querySelectorAll('li.navbar-search-option');
+    for (const item of items) {
+        if (item.classList.contains('rovalra-quick-search-result')) continue;
+
+        const baselineClasses = [
+            'navbar-search-option',
+            'rbx-clickable-li',
+            'new-selected',
+            'improved-search',
+        ];
+        let hasExternalClass = false;
+        for (const cls of item.classList) {
+            if (!baselineClasses.includes(cls)) {
+                hasExternalClass = true;
+                break;
+            }
+        }
+        if (hasExternalClass) return true;
+    }
+    return false;
+}
+
+function syncSelection() {
+    const menu = document.querySelector('ul.new-dropdown-menu');
+    if (!menu) return;
+
+    const items = Array.from(menu.querySelectorAll('li.navbar-search-option'));
+    if (items.length === 0) return;
+
+    if (hasExternalSearchItems()) {
+        selectedIndex = 0;
+        menu.querySelectorAll('.rovalra-quick-search-result').forEach(
+            (item, index) => {
+                item.classList.toggle('new-selected', index === 0);
+            },
+        );
+        return;
+    }
+
+    if (selectedIndex < 0) selectedIndex = items.length - 1;
+    if (selectedIndex >= items.length) selectedIndex = 0;
+
+    items.forEach((item, index) => {
+        item.classList.toggle('new-selected', index === selectedIndex);
+    });
+}
+
 let searchSettings = {
     quickSearchEnabled: true,
     userSearchEnabled: true,
     gameSearchEnabled: true,
     friendSearchEnabled: true,
     searchHistoryEnabled: true,
+    profileBackgroundGradientEnabled: true,
+    applyGradientToAvatarTile: true,
+    avatarBorderEnabled: true,
 };
 
 function updateSearchSettings() {
@@ -62,11 +195,114 @@ function updateSearchSettings() {
             'gameSearchEnabled',
             'friendSearchEnabled',
             'searchHistoryEnabled',
+            'profileBackgroundGradientEnabled',
+            'applyGradientToAvatarTile',
+            'avatarBorderEnabled',
         ],
         (result) => {
             if (result) Object.assign(searchSettings, result);
         },
     );
+}
+
+function parseGradientString(gradientStr) {
+    const parts = gradientStr.split(',').map((s) => s.trim());
+    if (parts.length < 3) return null;
+
+    const color1 = parts[0] || '#667eea';
+    const color2 = parts[1] || '#764ba2';
+    const parsedFade = parseInt(parts[2], 10);
+    const parsedAngle = parseInt(parts[3], 10);
+    const fade = Number.isFinite(parsedFade) ? parsedFade : 100;
+    const angle = Number.isFinite(parsedAngle) ? parsedAngle : 135;
+
+    const s1 = (100 - fade) / 2;
+    const s2 = 100 - s1;
+    return `linear-gradient(${angle}deg, ${color1} ${s1}%, ${color2} ${s2}%)`;
+}
+
+function getQuickSearchCosmetics(userId) {
+    const cacheKey = String(userId);
+    if (!quickSearchCosmeticsPromises.has(cacheKey)) {
+        quickSearchCosmeticsPromises.set(
+            cacheKey,
+            getUserSettings(userId, { useDescription: false }).catch(
+                (error) => {
+                    quickSearchCosmeticsPromises.delete(cacheKey);
+                    throw error;
+                },
+            ),
+        );
+    }
+
+    return quickSearchCosmeticsPromises.get(cacheKey);
+}
+
+function waitForConnectedElement(element, timeoutMs = 1500) {
+    if (element.isConnected) return Promise.resolve(true);
+
+    return new Promise((resolve) => {
+        const startedAt = Date.now();
+
+        const check = () => {
+            if (element.isConnected) {
+                resolve(true);
+                return;
+            }
+
+            if (Date.now() - startedAt >= timeoutMs) {
+                resolve(false);
+                return;
+            }
+
+            requestAnimationFrame(check);
+        };
+
+        requestAnimationFrame(check);
+    });
+}
+
+async function applyUserCosmetics(userId, thumbContainer) {
+    if (
+        !searchSettings.profileBackgroundGradientEnabled &&
+        !searchSettings.avatarBorderEnabled
+    ) {
+        return;
+    }
+
+    try {
+        const userSettings = await getQuickSearchCosmetics(userId);
+
+        if (
+            searchSettings.profileBackgroundGradientEnabled &&
+            searchSettings.applyGradientToAvatarTile &&
+            userSettings?.gradient
+        ) {
+            const gradient = parseGradientString(userSettings.gradient);
+            if (gradient) {
+                thumbContainer.style.background = gradient;
+                thumbContainer.style.backgroundSize = '250% 250%';
+                thumbContainer.style.backgroundPosition = 'center';
+            }
+        }
+
+        if (
+            searchSettings.avatarBorderEnabled &&
+            userSettings?.border &&
+            userSettings.border !== 'none'
+        ) {
+            const connected = await waitForConnectedElement(thumbContainer);
+            if (!connected) return;
+
+            await applyBorderToContainer(thumbContainer, userSettings.border);
+        }
+    } catch (e) {
+        console.warn(
+            'RoValra: Failed to apply quick search cosmetics for user',
+            userId,
+            e,
+        );
+    }
 }
 
 async function fetchWithRetry(options, retries = 3, signal = null) {
@@ -102,7 +338,7 @@ async function fetchWithRetry(options, retries = 3, signal = null) {
     }
 }
 
-async function performUserSearch(query) {
+async function performUserSearch(query, request) {
     if (userSearchAbortController) {
         userSearchAbortController.abort();
     }
@@ -111,7 +347,7 @@ async function performUserSearch(query) {
 
     try {
         const authedUserId = await getAuthenticatedUserId();
-        if (signal.aborted) return;
+        if (!isCurrentSearchRequest(request, signal)) return;
 
         const promises = [];
         if (searchSettings.userSearchEnabled && query.length >= 2) {
@@ -163,7 +399,7 @@ async function performUserSearch(query) {
 
         localFriendsPromise
             .then(async (localFriends) => {
-                if (signal.aborted) return;
+                if (!isCurrentSearchRequest(request, signal)) return;
 
                 if (localFriends.length > 0) {
                     const validUsers = localFriends.map((f) => ({
@@ -182,9 +418,38 @@ async function performUserSearch(query) {
                         false,
                         signal,
                     );
-                    if (signal.aborted) return;
+                    if (!isCurrentSearchRequest(request, signal)) return;
 
-                    const presencePromise = fetchWithRetry(
+                    setSearchResult(
+                        request,
+                        'friendResults',
+                        validUsers
+                            .map((friendUser) => {
+                                const userResult = getSearchResult(
+                                    request,
+                                    'userResult',
+                                );
+                                if (
+                                    userResult &&
+                                    userResult.dataset.userId == friendUser.id
+                                ) {
+                                    return null;
+                                }
+                                const thumbData = thumbnailMap.get(
+                                    friendUser.id,
+                                );
+                                return createUserResultHtml(
+                                    friendUser,
+                                    thumbData,
+                                    null,
+                                    true,
+                                    friendUser.isTrusted,
+                                );
+                            })
+                            .filter((el) => el !== null),
+                    );
+
+                    fetchWithRetry(
                         {
                             subdomain: 'presence',
                             endpoint: '/v1/presence/users',
@@ -193,40 +458,56 @@ async function performUserSearch(query) {
                         },
                         3,
                         signal,
-                    ).catch(() => null);
+                    )
+                        .then((presenceData) => {
+                            if (!isCurrentSearchRequest(request, signal))
+                                return;
 
-                    const [presenceData] = await Promise.all([presencePromise]);
-                    if (signal.aborted) return;
-
-                    const presences = presenceData?.userPresences || [];
-                    const presenceMap = new Map(
-                        presences.map((p) => [p.userId, p]),
-                    );
-
-                    window._lastRoValraFriendResults = validUsers
-                        .map((friendUser) => {
-                            if (
-                                window._lastRoValraUserResult &&
-                                window._lastRoValraUserResult.dataset.userId ==
-                                    friendUser.id
-                            ) {
-                                return null;
-                            }
-                            const thumbData = thumbnailMap.get(friendUser.id);
-                            const presence = presenceMap.get(friendUser.id);
-                            return createUserResultHtml(
-                                friendUser,
-                                thumbData,
-                                presence,
-                                true,
-                                friendUser.isTrusted,
+                            const presences = presenceData?.userPresences || [];
+                            const presenceMap = new Map(
+                                presences.map((p) => [p.userId, p]),
                             );
+
+                            setSearchResult(
+                                request,
+                                'friendResults',
+                                validUsers
+                                    .map((friendUser) => {
+                                        const userResult = getSearchResult(
+                                            request,
+                                            'userResult',
+                                        );
+                                        if (
+                                            userResult &&
+                                            userResult.dataset.userId ==
+                                                friendUser.id
+                                        ) {
+                                            return null;
+                                        }
+
+                                        const thumbData = thumbnailMap.get(
+                                            friendUser.id,
+                                        );
+                                        const presence = presenceMap.get(
+                                            friendUser.id,
+                                        );
+                                        return createUserResultHtml(
+                                            friendUser,
+                                            thumbData,
+                                            presence,
+                                            true,
+                                            friendUser.isTrusted,
+                                        );
+                                    })
+                                    .filter((el) => el !== null),
+                            );
+                            if (request.committed) injectIntoMenu();
                         })
-                        .filter((el) => el !== null);
+                        .catch(() => {});
                 } else {
-                    window._lastRoValraFriendResults = [];
+                    setSearchResult(request, 'friendResults', []);
                 }
-                injectIntoMenu();
+                if (request.committed) injectIntoMenu();
             })
             .catch((e) => {
                 if (e.name !== 'AbortError')
@@ -235,7 +516,7 @@ async function performUserSearch(query) {
 
         const [userSearchData, localFriends] = await Promise.all(promises);
 
-        if (signal.aborted) return;
+        if (!isCurrentSearchRequest(request, signal)) return;
 
         const userResult = userSearchData?.data?.[0];
         const friendIdsFromSearch = localFriends.map((f) => f.id);
@@ -250,29 +531,14 @@ async function performUserSearch(query) {
                 );
             }
         }
-        const uniqueFriends = localFriends.filter(
-            (f) => !userResult || f.id !== userResult.id,
-        );
-        const uniqueFriendIds = uniqueFriends.map((f) => f.id);
-
         if (userResult) {
-            if (signal.aborted) return;
+            if (!isCurrentSearchRequest(request, signal)) return;
 
             const promises2 = [
                 fetchThumbnails(
                     [{ id: userResult.id }],
                     'AvatarHeadshot',
                     '48x48',
-                ),
-                fetchWithRetry(
-                    {
-                        subdomain: 'presence',
-                        endpoint: '/v1/presence/users',
-                        method: 'POST',
-                        body: { userIds: [userResult.id] },
-                    },
-                    3,
-                    signal,
                 ),
             ];
 
@@ -298,9 +564,9 @@ async function performUserSearch(query) {
                 promises2.push(Promise.resolve(null));
             }
 
-            const [userThumbnailMap, presenceData, fetchedUserDetails] =
+            const [userThumbnailMap, fetchedUserDetails] =
                 await Promise.all(promises2);
-            if (signal.aborted) return;
+            if (!isCurrentSearchRequest(request, signal)) return;
 
             let userDetails = fetchedUserDetails;
             let isTrusted = false;
@@ -325,34 +591,73 @@ async function performUserSearch(query) {
             }
 
             const userThumbData = userThumbnailMap.get(userResult.id);
-            const userPresence = presenceData?.userPresences?.[0];
-            window._lastRoValraUserResult = createUserResultHtml(
-                userDetails,
-                userThumbData,
-                userPresence,
-                userResultIsFriend,
-                isTrusted,
+            setSearchResult(
+                request,
+                'userResult',
+                createUserResultHtml(
+                    userDetails,
+                    userThumbData,
+                    null,
+                    userResultIsFriend,
+                    isTrusted,
+                ),
             );
 
-            if (window._lastRoValraFriendResults) {
-                window._lastRoValraFriendResults =
-                    window._lastRoValraFriendResults.filter(
-                        (el) => el.dataset.userId != userResult.id,
+            fetchWithRetry(
+                {
+                    subdomain: 'presence',
+                    endpoint: '/v1/presence/users',
+                    method: 'POST',
+                    body: { userIds: [userResult.id] },
+                },
+                3,
+                signal,
+            )
+                .then((presenceData) => {
+                    if (!isCurrentSearchRequest(request, signal)) return;
+
+                    const userPresence = presenceData?.userPresences?.[0];
+                    setSearchResult(
+                        request,
+                        'userResult',
+                        createUserResultHtml(
+                            userDetails,
+                            userThumbData,
+                            userPresence,
+                            userResultIsFriend,
+                            isTrusted,
+                        ),
                     );
-            }
+
+                    filterFriendResults(request, userResult.id);
+                    if (request.committed) injectIntoMenu();
+                })
+                .catch(() => {});
+
+            filterFriendResults(request, userResult.id);
         } else {
-            window._lastRoValraUserResult = null;
+            setSearchResult(request, 'userResult', null);
         }
 
-        injectIntoMenu();
+        request.userDone = true;
+        commitQuickSearchRequest(request);
     } catch (e) {
-        if (e.name !== 'AbortError')
+        if (e.name !== 'AbortError') {
             console.error(ts('quickSearch.userSearchError'), e);
+            if (isCurrentSearchRequest(request, signal)) {
+                request.userDone = true;
+                commitQuickSearchRequest(request);
+            }
+        }
     }
 }
 
-async function performGameSearch(query) {
-    if (!searchSettings.gameSearchEnabled) return;
+async function performGameSearch(query, request) {
+    if (!searchSettings.gameSearchEnabled) {
+        request.gameDone = true;
+        commitQuickSearchRequest(request);
+        return;
+    }
 
     if (gameSearchAbortController) {
         gameSearchAbortController.abort();
@@ -362,7 +667,7 @@ async function performGameSearch(query) {
 
     try {
         const authedUserId = await getAuthenticatedUserId();
-        if (signal.aborted) return;
+        if (!isCurrentSearchRequest(request, signal)) return;
 
         if (cachedUserId !== authedUserId) {
             cachedFriendsData = null;
@@ -408,7 +713,7 @@ async function performGameSearch(query) {
             friendsPromise,
         ]);
 
-        if (signal.aborted) return;
+        if (!isCurrentSearchRequest(request, signal)) return;
 
         const gameResult = gameSearchData?.searchResults?.find(
             (r) => r.contentGroupType === 'Game' && r.contents?.length > 0,
@@ -420,7 +725,7 @@ async function performGameSearch(query) {
                     (f) => f.userPresence?.universeId === game.universeId,
                 ) || [];
 
-            if (signal.aborted) return;
+            if (!isCurrentSearchRequest(request, signal)) return;
             const promises = [
                 fetchThumbnails([{ id: game.universeId }], 'GameIcon', '50x50'),
                 fetchWithRetry(
@@ -447,7 +752,7 @@ async function performGameSearch(query) {
             const thumbnailMap = results[0];
             const votesData = results[1];
 
-            if (signal.aborted) return;
+            if (!isCurrentSearchRequest(request, signal)) return;
             const voteInfo =
                 votesData.data && votesData.data[0]
                     ? votesData.data[0]
@@ -487,21 +792,33 @@ async function performGameSearch(query) {
                     .filter((f) => f !== null);
             }
 
-            window._lastRoValraGameResult = createResultHtml(
-                game,
-                thumbnailUrl,
-                playerCount,
-                voteRatio,
-                totalVotes,
-                settings,
-                friendsInfo,
+            setSearchResult(
+                request,
+                'gameResult',
+                createResultHtml(
+                    game,
+                    thumbnailUrl,
+                    playerCount,
+                    voteRatio,
+                    totalVotes,
+                    settings,
+                    friendsInfo,
+                ),
             );
+        } else {
+            setSearchResult(request, 'gameResult', null);
         }
 
-        injectIntoMenu();
+        request.gameDone = true;
+        commitQuickSearchRequest(request);
     } catch (e) {
-        if (e.name !== 'AbortError')
+        if (e.name !== 'AbortError') {
             console.error(ts('quickSearch.gameSearchError'), e);
+            if (isCurrentSearchRequest(request, signal)) {
+                request.gameDone = true;
+                commitQuickSearchRequest(request);
+            }
+        }
     }
 }
 
@@ -568,6 +885,7 @@ function createUserResultHtml(
         },
     );
     thumbContainer.appendChild(thumbEl);
+    applyUserCosmetics(user.id, thumbContainer);
 
     if (presence) {
         let presenceClass = '';
@@ -589,7 +907,7 @@ function createUserResultHtml(
 
         if (presenceClass) {
             const presenceIndicator = document.createElement('span');
-            presenceIndicator.className = presenceClass;
+            presenceIndicator.className = `${presenceClass} avatar-status`;
             presenceIndicator.setAttribute('data-testid', 'presence-icon');
             Object.assign(presenceIndicator.style, {
                 position: 'absolute',
@@ -937,7 +1255,7 @@ function createResultHtml(
     return li;
 }
 
-function injectIntoMenu() {
+function injectIntoMenu(resetSelection = false) {
     const menu = document.querySelector('ul.new-dropdown-menu');
     if (!menu) return;
 
@@ -963,16 +1281,10 @@ function injectIntoMenu() {
         menu.prepend(window._lastRoValraUserResult);
     }
 
-    const firstResult = menu.querySelector('.rovalra-quick-search-result');
-    const currentlySelected = menu.querySelector('.new-selected');
-    if (
-        firstResult &&
-        currentlySelected &&
-        !currentlySelected.classList.contains('rovalra-quick-search-result')
-    ) {
-        currentlySelected.classList.remove('new-selected');
-        firstResult.classList.add('new-selected');
+    if (resetSelection) {
+        selectedIndex = 0;
     }
+    syncSelection();
 }
 
 function injectExistingResult() {
@@ -996,17 +1308,7 @@ function injectExistingResult() {
             menu.prepend(window._lastRoValraUserResult);
         }
     }
-
-    const firstResult = menu?.querySelector('.rovalra-quick-search-result');
-    const currentlySelected = menu?.querySelector('.new-selected');
-    if (
-        firstResult &&
-        currentlySelected &&
-        !currentlySelected.classList.contains('rovalra-quick-search-result')
-    ) {
-        currentlySelected.classList.remove('new-selected');
-        firstResult.classList.add('new-selected');
-    }
+    syncSelection();
 }
 
 async function getHistory() {
@@ -1253,15 +1555,21 @@ async function renderSearchHistory(container) {
     history.forEach((item) => {
         let term;
         let iconUrl = null;
+        let href = null;
 
         if (typeof item === 'string') {
             term = item;
         } else {
             term = item.name;
             iconUrl = item.thumbnail;
+            if (item.type === 'user') {
+                href = `https://www.roblox.com/users/${item.id}/profile`;
+            } else if (item.type === 'game') {
+                href = `https://www.roblox.com/games/${item.id}/`;
+            }
         }
 
-        const pill = createPill(term, null, { isButton: true, iconUrl });
+        const pill = createPill(term, null, { isButton: true, iconUrl, href });
         pill.style.flexShrink = '0';
 
         if (typeof item !== 'string' && item.id && item.type) {
@@ -1273,18 +1581,7 @@ async function renderSearchHistory(container) {
         }
 
         pill.addEventListener('click', () => {
-            if (
-                typeof item === 'object' &&
-                item !== null &&
-                item.type &&
-                item.id
-            ) {
-                if (item.type === 'user') {
-                    window.location.href = `https://www.roblox.com/users/${item.id}/profile`;
-                } else if (item.type === 'game') {
-                    window.location.href = `https://www.roblox.com/games/${item.id}/`;
-                }
-            } else {
+            if (typeof item === 'string') {
                 const input = document.getElementById('navbar-search-input');
                 if (input) {
                     input.value = term;
@@ -1455,7 +1752,10 @@ export function init() {
                 changes.userSearchEnabled ||
                 changes.gameSearchEnabled ||
                 changes.friendSearchEnabled ||
-                changes.searchHistoryEnabled
+                changes.searchHistoryEnabled ||
+                changes.profileBackgroundGradientEnabled ||
+                changes.applyGradientToAvatarTile ||
+                changes.avatarBorderEnabled
             ) {
                 updateSearchSettings();
             }
@@ -1471,11 +1771,22 @@ export function init() {
             clearInterval(seeker);
             initialSearchValue = input.value;
 
-            input.addEventListener('input', () => {
+            const triggerSearch = (force = false) => {
                 if (!searchSettings.quickSearchEnabled) return;
                 const currentVal = (input.value || '').trim();
 
-                if (currentVal === lastSearchedQuery) return;
+                if (!force && currentVal === lastSearchedQuery) return;
+
+                if (force && currentVal === lastSearchedQuery) {
+                    injectExistingResult();
+                    if (
+                        window._lastRoValraUserResult ||
+                        window._lastRoValraGameResult ||
+                        window._lastRoValraFriendResults?.length
+                    )
+                        return;
+                }
+
                 lastSearchedQuery = currentVal;
 
                 if (userSearchAbortController)
@@ -1483,64 +1794,91 @@ export function init() {
                 if (gameSearchAbortController)
                     gameSearchAbortController.abort('New search initiated');
 
-                window._lastRoValraUserResult = null;
-                window._lastRoValraGameResult = null;
-                window._lastRoValraFriendResults = [];
-                injectIntoMenu();
-
                 if (currentVal.length < 1) {
+                    activeQuickSearchRequest = null;
+                    latestCommittedQuickSearchRequest = null;
+                    selectedIndex = 0;
+                    window._lastRoValraUserResult = null;
+                    window._lastRoValraGameResult = null;
+                    window._lastRoValraFriendResults = [];
+                    injectIntoMenu(true);
                     return;
                 }
 
-                debouncedUserSearch(currentVal);
+                const request = createQuickSearchRequest(currentVal);
+                activeQuickSearchRequest = request;
 
+                debouncedUserSearch(currentVal, request);
                 if (currentVal.length >= 2) {
-                    debouncedGameSearch(currentVal);
-                } else {
-                    window._lastRoValraUserResult = null;
-                    window._lastRoValraGameResult = null;
+                    debouncedGameSearch(currentVal, request);
                 }
-            });
+            };
+
+            input.addEventListener('input', () => triggerSearch());
+            input.addEventListener('focus', () => triggerSearch(true));
 
             input.addEventListener('keydown', (e) => {
                 if (!searchSettings.quickSearchEnabled) return;
 
                 const menu = document.querySelector('ul.new-dropdown-menu');
-                const isMenuVisible = menu && menu.offsetParent !== null;
+                const isMenuVisible =
+                    menu &&
+                    (menu.offsetParent !== null ||
+                        menu.classList.contains('show'));
 
-                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                if (hasExternalSearchItems()) return;
+
+                if (
+                    e.key === 'ArrowDown' ||
+                    e.key === 'ArrowUp' ||
+                    e.key === 'Tab'
+                ) {
                     if (isMenuVisible) {
                         const items = Array.from(
                             menu.querySelectorAll('li.navbar-search-option'),
                         );
                         if (items.length > 0) {
                             e.preventDefault();
-                            e.stopPropagation();
+                            e.stopImmediatePropagation();
 
-                            let selectedIndex = items.findIndex((item) =>
-                                item.classList.contains('new-selected'),
-                            );
-
-                            if (selectedIndex !== -1) {
-                                items[selectedIndex].classList.remove(
-                                    'new-selected',
-                                );
-                            }
-
-                            if (e.key === 'ArrowDown') {
+                            if (
+                                e.key === 'ArrowDown' ||
+                                (e.key === 'Tab' && !e.shiftKey)
+                            ) {
                                 selectedIndex++;
-                                if (selectedIndex >= items.length)
-                                    selectedIndex = 0;
                             } else {
                                 selectedIndex--;
-                                if (selectedIndex < 0)
-                                    selectedIndex = items.length - 1;
                             }
-
-                            items[selectedIndex].classList.add('new-selected');
+                            syncSelection();
                         }
                     }
                 } else if (e.key === 'Enter') {
+                    if (
+                        isMenuVisible &&
+                        menu.querySelector(
+                            'li.navbar-search-option.new-selected',
+                        )
+                    ) {
+                        e.preventDefault();
+                        e.stopImmediatePropagation();
+                    }
+                }
+            });
+
+            input.addEventListener(
+                'keyup',
+                (e) => {
+                    if (!searchSettings.quickSearchEnabled || e.key !== 'Enter')
+                        return;
+
+                    const menu = document.querySelector('ul.new-dropdown-menu');
+                    const isMenuVisible =
+                        menu &&
+                        (menu.offsetParent !== null ||
+                            menu.classList.contains('show'));
+
+                    if (isMenuVisible && hasExternalSearchItems()) return;
+
                     let handled = false;
                     if (isMenuVisible) {
                         const selected = menu.querySelector(
@@ -1550,8 +1888,15 @@ export function init() {
                             const link = selected.querySelector('a');
                             if (link) {
                                 e.preventDefault();
+                                e.stopImmediatePropagation();
                                 e.stopPropagation();
-                                link.click();
+
+                                if (link.href) {
+                                    link.click();
+                                    if (window.location.href !== link.href) {
+                                        window.location.href = link.href;
+                                    }
+                                }
                                 handled = true;
                             }
                         }
@@ -1564,13 +1909,53 @@ export function init() {
                             initialSearchValue = val;
                         }
                     }
-                }
-            });
+                },
+                { capture: true },
+            );
 
-            observeElement('ul.new-dropdown-menu', () => {
+            observeElement('ul.new-dropdown-menu', (menu) => {
                 if (searchSettings.quickSearchEnabled) {
                     injectExistingResult();
                 }
+
+                observeAttributes(
+                    menu,
+                    (mutation) => {
+                        if (hasExternalSearchItems()) return;
+
+                        const target = mutation.target;
+                        if (
+                            !target.classList.contains(
+                                'navbar-search-option',
+                            ) ||
+                            !target.classList.contains(
+                                'rovalra-quick-search-result',
+                            )
+                        ) {
+                            return;
+                        }
+
+                        const items = Array.from(
+                            menu.querySelectorAll('li.navbar-search-option'),
+                        );
+                        const idx = items.indexOf(target);
+                        if (idx === -1) return;
+
+                        if (
+                            idx === selectedIndex &&
+                            !target.classList.contains('new-selected')
+                        ) {
+                            target.classList.add('new-selected');
+                        } else if (
+                            idx !== selectedIndex &&
+                            target.classList.contains('new-selected')
+                        ) {
+                            target.classList.remove('new-selected');
+                        }
+                    },
+                    ['class'],
+                    { subtree: true },
+                );
             });
 
             observeElement(

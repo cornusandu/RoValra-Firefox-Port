@@ -2,6 +2,7 @@
 import { createOverlay } from '../overlay.js';
 import { createSpinner } from '../spinner.js';
 import { getAssets } from '../../assets.js';
+import { parseMarkdown } from '../../utils/markdown.js';
 import DOMPurify from 'dompurify';
 
 let activeInstance = null;
@@ -29,6 +30,7 @@ export function showLoadingOverlay(
         logoImg.src = customLogo;
     } else {
         try {
+            logoImg.dataset.rovalraAsset = 'rovalraIcon';
             logoImg.src = getAssets().rovalraIcon;
         } catch (e) {}
     }
@@ -36,9 +38,15 @@ export function showLoadingOverlay(
     logoImg.className = 'rovalra-gamelaunch-logo';
     bodyWrapper.appendChild(logoImg);
 
-    const textElement = document.createElement('h2');
+    const textElement = document.createElement('div');
     textElement.className = 'text-heading-medium rovalra-gamelaunch-text';
-    textElement.innerHTML = 'Searching For Servers...';
+    textElement.style.color = 'var(--rovalra-main-text-color)';
+    textElement.innerHTML = DOMPurify.sanitize(
+        parseMarkdown('Searching For Servers...'),
+    );
+    textElement.querySelectorAll('.rovalra-markdown *').forEach((el) => {
+        el.style.color = 'inherit';
+    });
     bodyWrapper.appendChild(textElement);
 
     const infoContainer = document.createElement('div');
@@ -102,8 +110,14 @@ export function hideLoadingOverlay(force = false) {
 }
 
 export function updateLoadingOverlayText(text) {
-    if (activeInstance?.textElement)
-        activeInstance.textElement.innerHTML = DOMPurify.sanitize(text);
+    if (activeInstance?.textElement) {
+        activeInstance.textElement.innerHTML = DOMPurify.sanitize(
+            parseMarkdown(text),
+        );
+        activeInstance.textElement
+            .querySelectorAll('.rovalra-markdown *')
+            .forEach((el) => (el.style.color = 'inherit'));
+    }
 }
 
 export function updateServerInfo(gameName, iconUrl, detailsHtml) {

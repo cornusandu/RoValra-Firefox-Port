@@ -3,6 +3,16 @@
 import { callRobloxApi } from '../../api.js';
 import { observeElement } from '../../observer.js';
 import { loadDatacenterMap, datacenterList } from '../../regions.js';
+import { getPlaceIdFromUrl } from '../../idExtractor.js';
+import {
+    fetchServerDetails,
+    fetchServerRegion,
+    getServerRegion,
+    getServerUptimeIsEstimate,
+    getServerUptime,
+    getServerVersion,
+    formatUptime,
+} from '../../apis/serverApi.js';
 
 const CLASSES = {
     CONTAINER: 'rovalra-details-container',
@@ -58,8 +68,6 @@ let isServerPerformanceEnabled = true;
 let isMiscIndicatorsEnabled = true;
 let isDatacenterAndIdEnabled = true;
 let isServerListModificationsEnabled = true;
-
-const serverVersionsCache = {};
 
 const cacheReadyPromise = new Promise((resolve) => {
     loadDatacenterMap()
@@ -161,7 +169,6 @@ export function createUUID() {
               return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
           });
 }
-
 function getLocationFromDataCenterId(id) {
     if (!datacenterList || !id) return null;
     const numId = Number(id);
@@ -185,19 +192,6 @@ export function getFullLocationName(data) {
     const parts = [city, region && region !== city ? region : null];
 
     return [...new Set(parts.filter(Boolean))].join(', ') || 'Unknown Region';
-}
-
-function formatUptimeString(seconds) {
-    if (seconds < 60) return null;
-    const days = Math.floor(seconds / 86400);
-    const hours = Math.floor((seconds % 86400) / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-
-    const parts = [];
-    if (days > 0) parts.push(`${days}d`);
-    if (hours > 0) parts.push(`${hours}h`);
-    if (minutes > 0) parts.push(`${minutes}m~`);
-    return parts.join(' ') || '0m~';
 }
 
 function normalizeText(s) {
@@ -288,11 +282,28 @@ export function getOrCreateDetailsContainer(server) {
     if (statusNode && statusNode.parentNode) {
         statusNode.parentNode.insertBefore(container, statusNode.nextSibling);
     } else {
-        const detailsParent = server.querySelector(
-            '.rbx-game-server-details, .rbx-friends-game-server-details',
+        const modernLeftWrapper = server.querySelector(
+            '.flex.items-center.gap-medium.min-width-0',
         );
+        const detailsParent =
+            modernLeftWrapper ||
+            server.querySelector(
+                '.rbx-game-server-details, .rbx-friends-game-server-details',
+            );
+
         if (detailsParent) {
-            detailsParent.prepend(container);
+            if (modernLeftWrapper) {
+                const column = detailsParent.querySelector(
+                    '.flex.flex-col.min-width-0',
+                );
+                if (column) {
+                    column.appendChild(container);
+                } else {
+                    detailsParent.appendChild(container);
+                }
+            } else {
+                detailsParent.prepend(container);
+            }
         } else {
             server.appendChild(container);
         }
@@ -325,11 +336,6 @@ function updateInfoElement(container, type, iconHTML, text, isVisible = true) {
     const className = CLASSES[type];
     let element = container.querySelector(`.${className}`);
 
-    if (!isVisible) {
-        if (element) element.style.display = 'none';
-        return;
-    }
-
     if (!element) {
         element = createInfoElement(className, iconHTML, text);
         const orderIndex = ORDERS[type] || ORDERS.Status;
@@ -345,7 +351,14 @@ function updateInfoElement(container, type, iconHTML, text, isVisible = true) {
     if (iconWrapper) iconWrapper.innerHTML = iconHTML;
     if (textWrapper) textWrapper.textContent = text;
 
-    element.style.display = 'flex';
+    if (!isVisible) {
+        element.style.display = 'none';
+        element.style.visibility = 'visible';
+    } else {
+        element.style.display = 'flex';
+        element.style.visibility = 'visible';
+    }
+
     return element;
 }
 
@@ -419,7 +432,12 @@ export function displayPerformance(server, fps, serverLocations = {}) {
     updateInfoElement(container, 'Performance', icon, text, visible);
 }
 
-export function displayUptime(server, uptime, serverLocations = {}) {
+export function displayUptime(
+    server,
+    uptime,
+    isEstimate,
+    serverLocations = {},
+) {
     if (!isServerUptimeEnabled || !isServerListModificationsEnabled) {
         const container = getOrCreateDetailsContainer(server);
         updateInfoElement(container, 'Uptime', '', '', false);
@@ -429,18 +447,17 @@ export function displayUptime(server, uptime, serverLocations = {}) {
     if (serverLocations[server.dataset.rovalraServerid] === 'private') return;
 
     const container = getOrCreateDetailsContainer(server);
-    let text = 'Unknown';
-    let visible = false;
+    let text = '1m~';
+    let visible = true;
 
     if (uptime === 'fetching') {
         text = 'Loading...';
-        visible = true;
     } else if (typeof uptime === 'number') {
-        const fmt = formatUptimeString(uptime);
-        if (fmt) {
-            text = fmt;
-            visible = true;
-        }
+        text = formatUptime(uptime, isEstimate);
+    } else if (uptime === 'N/A') {
+        text = '1m~';
+    } else {
+        visible = false;
     }
 
     updateInfoElement(container, 'Uptime', ICONS.uptime, text, visible);
@@ -621,79 +638,55 @@ export async function fetchServerUptime(
     if (!validIds.length) return;
 
     try {
-        const response = await callRobloxApi({
-            subdomain: 'apis',
-            endpoint: `/v1/servers/details?place_id=${placeId}&server_ids=${validIds.join(',')}`,
-            method: 'GET',
-            isRovalraApi: true,
-        });
+        const response = await fetchServerDetails(placeId, validIds);
 
-        if (!response.ok) throw new Error('API Error');
-        const data = await response.json();
-
-        if (data.status !== 'success' || !data.servers)
+        if (!response.servers || response.servers.length === 0) {
             throw new Error('Invalid API Data');
+        }
 
         const now = new Date();
         const foundIds = new Set();
 
-        data.servers.forEach((info) => {
+        response.servers.forEach((info) => {
             const {
-                server_id,
-                first_seen,
-                place_version,
-                city,
+                serverId,
+                placeVersion,
+                isEstimate,
+                uptime,
                 region,
-                country,
-                ip_address,
-                datacenter_id,
-            } = info;
-            if (!server_id) return;
-
-            foundIds.add(server_id);
-
-            if (place_version) serverVersionsCache[server_id] = place_version;
-
-            const versionToDisplay =
-                place_version || serverVersionsCache[server_id];
-
-            let uptime = 'N/A';
-            if (first_seen) {
-                const date = new Date(
-                    first_seen.endsWith('Z') ? first_seen : first_seen + 'Z',
-                );
-                if (!isNaN(date)) uptime = Math.max(0, (now - date) / 1000);
-            }
-            serverUptimes[server_id] = uptime;
-
-            let regionStr = null;
-            const locParts = [
+                ipAddress,
+                datacenterId,
                 city,
-                region && region !== city ? region : null,
+                regionName,
                 country,
-            ].filter((p) => p && p !== 'Unknown');
-            if (locParts.length) {
-                regionStr = [...new Set(locParts)].join(', ');
-                serverLocations[server_id] = regionStr;
+            } = info;
+            if (!serverId) return;
+
+            foundIds.add(serverId);
+
+            const versionToDisplay = getServerVersion(serverId) || placeVersion;
+
+            if (region) {
+                serverLocations[serverId] = region;
             }
 
             const serverEls = document.querySelectorAll(
-                `[data-rovalra-serverid="${server_id}"]`,
+                `[data-rovalra-serverid="${serverId}"]`,
             );
 
             serverEls.forEach((serverEl) => {
-                if (ip_address != null) serverEl.dataset.rovalraIp = ip_address;
-                if (datacenter_id != null)
-                    serverEl.dataset.rovalraDcId = datacenter_id;
+                if (ipAddress != null) serverEl.dataset.rovalraIp = ipAddress;
+                if (datacenterId != null)
+                    serverEl.dataset.rovalraDcId = datacenterId;
 
                 displayPlaceVersion(
                     serverEl,
                     versionToDisplay,
                     serverLocations,
                 );
-                displayUptime(serverEl, uptime, serverLocations);
-                if (regionStr) {
-                    displayRegion(serverEl, regionStr, serverLocations);
+                displayUptime(serverEl, uptime, isEstimate, serverLocations);
+                if (region) {
+                    displayRegion(serverEl, region, serverLocations);
                 }
                 displayIpAndDcId(serverEl);
             });
@@ -702,24 +695,32 @@ export async function fetchServerUptime(
         validIds
             .filter((id) => !foundIds.has(id))
             .forEach((id) => {
-                serverUptimes[id] = 'N/A';
-
                 const matchingEls = document.querySelectorAll(
                     `[data-rovalra-serverid="${id}"]`,
                 );
                 matchingEls.forEach((el) => {
-                    displayUptime(el, 'N/A', serverLocations);
-                    if (!serverLocations[id]) displayServerFullStatus(el);
+                    displayUptime(
+                        el,
+                        getServerUptime(id),
+                        getServerUptimeIsEstimate(id),
+                        serverLocations,
+                    );
+                    if (!getServerRegion(id)) displayServerFullStatus(el);
                 });
             });
     } catch (e) {
+        console.error('Failed to fetch server details:', e);
         validIds.forEach((id) => {
-            serverUptimes[id] = 'N/A';
             const matchingEls = document.querySelectorAll(
                 `[data-rovalra-serverid="${id}"]`,
             );
             matchingEls.forEach((el) => {
-                displayUptime(el, 'N/A', serverLocations);
+                displayUptime(
+                    el,
+                    getServerUptime(id),
+                    getServerUptimeIsEstimate(id),
+                    serverLocations,
+                );
             });
         });
     }
@@ -731,152 +732,118 @@ export async function fetchAndDisplayRegion(
     serverLocations,
     options = {},
 ) {
-    let placeId =
-        server.dataset.placeid ||
-        window.location.href.match(/\/games\/(\d+)\//)?.[1];
+    let placeId = server.dataset.placeid || getPlaceIdFromUrl();
     if (!placeId) {
         if (!serverLocations[serverId]) displayServerFullStatus(server);
         return;
     }
 
     try {
-        const endpoint = options.isPrivate
-            ? '/v1/join-private-game'
-            : '/v1/join-game-instance';
-        const body = options.isPrivate
-            ? {
-                  placeId: parseInt(placeId),
-                  accessCode: options.accessCode,
-                  gameJoinAttemptId: createUUID(),
-              }
-            : {
-                  placeId: parseInt(placeId),
-                  gameId: serverId,
-                  gameJoinAttemptId: createUUID(),
-              };
-
-        const response = await callRobloxApi({
-            subdomain: 'gamejoin',
-            endpoint: endpoint,
-            method: 'POST',
-            body: body,
-        });
+        const info = await fetchServerRegion(placeId, serverId, options);
 
         if (server.dataset.rovalraServerid !== serverId) return;
 
-        if (response.ok) {
-            const info = await response.json();
-            const joinBtn = server.querySelector('.game-server-join-btn');
+        const joinBtn = server.querySelector('.game-server-join-btn');
 
-            if (info.joinScript) {
-                const joinScript = info.joinScript;
-                let changed = false;
-
-                if (
-                    joinScript.DataCenterId != null &&
-                    !server.dataset.rovalraDcId
-                ) {
-                    server.dataset.rovalraDcId = joinScript.DataCenterId;
-                    changed = true;
-                }
-
-                if (!server.dataset.rovalraIp) {
-                    let ip = null;
-                    if (
-                        joinScript.UdmuxEndpoints &&
-                        joinScript.UdmuxEndpoints.length > 0 &&
-                        joinScript.UdmuxEndpoints[0].Address
-                    ) {
-                        ip = joinScript.UdmuxEndpoints[0].Address;
-                    } else if (joinScript.MachineAddress) {
-                        ip = joinScript.MachineAddress;
-                    }
-
-                    if (ip) {
-                        server.dataset.rovalraIp = ip;
-                        changed = true;
-                    }
-                }
-
-                if (changed) {
-                    displayIpAndDcId(server);
-                }
-            }
-
-            if (info.status === 12) {
-                if (info.message?.includes('private instance')) {
-                    if (!serverLocations[serverId]) {
-                        serverLocations[serverId] = 'private';
-                        displayPrivateServerStatus(server);
-                    }
-                    return;
-                }
-                if (info.message?.toLowerCase().includes('purchase access')) {
-                    if (!serverLocations[serverId]) {
-                        serverLocations[serverId] = 'purchase';
-                        displayPurchaseGameStatus(server);
-                    }
-                    return;
-                }
-            }
-
-            if (info.status === 5) {
-                if (!serverLocations[serverId]) {
-                    serverLocations[serverId] = 'inactive';
-                    displayInactivePlaceStatus(server);
-                }
-                return;
-            }
-
-            if (info.status === 22) {
-                if (isFullServerIndicatorsEnabled) {
-                    if (joinBtn) {
-                        joinBtn.textContent =
-                            info.queuePosition > 0
-                                ? `Join (${info.queuePosition} In Queue)`
-                                : 'Server Full';
-                        joinBtn.classList.replace(
-                            'btn-primary-md',
-                            'btn-secondary-md',
-                        );
-                    }
-                    if (!serverLocations[serverId])
-                        displayServerFullStatus(server);
-                }
-                return;
-            }
-
-            if (info.joinScript?.PlaceVersion) {
-                if (!serverVersionsCache[serverId]) {
-                    serverVersionsCache[serverId] =
-                        info.joinScript.PlaceVersion;
-                    displayPlaceVersion(
-                        server,
-                        info.joinScript.PlaceVersion,
-                        serverLocations,
-                    );
-                }
-            }
+        if (info.joinScript) {
+            const joinScript = info.joinScript;
+            let changed = false;
 
             if (
-                !serverLocations[serverId] ||
-                serverLocations[serverId] === 'Unknown Region' ||
-                serverLocations[serverId] === 'Unknown'
+                joinScript.DataCenterId != null &&
+                !server.dataset.rovalraDcId
             ) {
-                const dcId = info.joinScript?.DataCenterId;
-                let locInfo =
-                    dcId && serverIpMap?.[dcId] ? serverIpMap[dcId] : null;
+                server.dataset.rovalraDcId = joinScript.DataCenterId;
+                changed = true;
+            }
 
-                if (!locInfo && dcId) {
-                    await cacheReadyPromise;
-                    locInfo = getLocationFromDataCenterId(dcId);
+            if (!server.dataset.rovalraIp) {
+                let ip = null;
+                if (
+                    joinScript.UdmuxEndpoints &&
+                    joinScript.UdmuxEndpoints.length > 0 &&
+                    joinScript.UdmuxEndpoints[0].Address
+                ) {
+                    ip = joinScript.UdmuxEndpoints[0].Address;
+                } else if (joinScript.MachineAddress) {
+                    ip = joinScript.MachineAddress;
                 }
 
-                if (locInfo) {
-                    const fullName = getFullLocationName(locInfo);
-                    serverLocations[serverId] = fullName;
-                    displayRegion(server, fullName, serverLocations);
+                if (ip) {
+                    server.dataset.rovalraIp = ip;
+                    changed = true;
                 }
+            }
+
+            if (changed) {
+                displayIpAndDcId(server);
+            }
+        }
+
+        if (info.status === 12) {
+            if (info.message?.includes('private instance')) {
+            } else if (
+                info.message?.toLowerCase().includes('purchase access')
+            ) {
+                if (!serverLocations[serverId]) {
+                    serverLocations[serverId] = 'purchase';
+                    displayPurchaseGameStatus(server);
+                }
+                return;
+            }
+        }
+
+        if (info.status === 5) {
+            if (!serverLocations[serverId]) {
+                serverLocations[serverId] = 'inactive';
+                displayInactivePlaceStatus(server);
+            }
+            return;
+        }
+
+        if (info.status === 22) {
+            if (isFullServerIndicatorsEnabled) {
+                if (joinBtn) {
+                    joinBtn.textContent =
+                        info.queuePosition > 0
+                            ? `Join (${info.queuePosition} In Queue)`
+                            : 'Server Full';
+                    joinBtn.classList.replace(
+                        'btn-primary-md',
+                        'btn-secondary-md',
+                    );
+                }
+                if (!serverLocations[serverId]) displayServerFullStatus(server);
+            }
+            return;
+        }
+
+        if (info.joinScript?.PlaceVersion && !getServerVersion(serverId)) {
+            displayPlaceVersion(
+                server,
+                info.joinScript.PlaceVersion,
+                serverLocations,
+            );
+        }
+
+        if (
+            !serverLocations[serverId] ||
+            serverLocations[serverId] === 'Unknown Region' ||
+            serverLocations[serverId] === 'Unknown'
+        ) {
+            const dcId = info.joinScript?.DataCenterId;
+            let locInfo =
+                dcId && serverIpMap?.[dcId] ? serverIpMap[dcId] : null;
+
+            if (!locInfo && dcId) {
+                await cacheReadyPromise;
+                locInfo = getLocationFromDataCenterId(dcId);
+            }
+
+            if (locInfo) {
+                const fullName = getFullLocationName(locInfo);
+                serverLocations[serverId] = fullName;
+                displayRegion(server, fullName, serverLocations);
             }
         }
     } catch (err) {
@@ -933,9 +900,7 @@ export async function addCopyJoinLinkButton(server, serverId) {
 
     if (server.querySelector('.rovalra-copy-join-link')) return;
 
-    const placeId =
-        server.dataset.placeid ||
-        window.location.href.match(/\/games\/(\d+)\//)?.[1];
+    const placeId = server.dataset.placeid || getPlaceIdFromUrl();
     if (!placeId) return;
 
     const btn = document.createElement('button');
@@ -1012,6 +977,23 @@ export async function enhanceServer(server, context) {
 
     server.classList.add('rovalra-checked');
 
+    if (!server._rovalraUptimeListener) {
+        server._rovalraUptimeListener = (e) => {
+            if (e.detail.serverId === serverId) {
+                displayUptime(
+                    server,
+                    e.detail.uptime,
+                    e.detail.isEstimate,
+                    serverLocations,
+                );
+            }
+        };
+        server.addEventListener(
+            'rovalra-uptime-update',
+            server._rovalraUptimeListener,
+        );
+    }
+
     cleanupServerUI(server);
     attachCleanupObserver(server);
     getOrCreateDetailsContainer(server);
@@ -1023,27 +1005,30 @@ export async function enhanceServer(server, context) {
     );
 
     if (!isPrivate) {
-        const cachedUptime = serverUptimes[serverId];
+        const cachedUptime = getServerUptime(serverId);
+        const cachedIsEstimate = getServerUptimeIsEstimate(serverId);
         displayUptime(
             server,
-            cachedUptime !== undefined ? cachedUptime : 'fetching',
-            serverLocations,
+            cachedUptime !== null ? cachedUptime : 'fetching',
+            cachedIsEstimate,
         );
     }
 
-    const cachedVersion = serverVersionsCache[serverId];
-    displayPlaceVersion(server, cachedVersion || 'Unknown', serverLocations);
+    displayPlaceVersion(
+        server,
+        getServerVersion(serverId) || 'Unknown',
+        serverLocations,
+    );
 
     const cachedLocation = serverLocations[serverId];
     displayRegion(server, cachedLocation || 'Unknown', serverLocations);
 
     const apiData = server._rovalraApiData;
     if (apiData && (apiData.server_id || apiData.id) === serverId) {
-        if (apiData.place_version) {
-            serverVersionsCache[serverId] = apiData.place_version;
+        if (apiData.place_version && !getServerVersion(serverId)) {
             displayPlaceVersion(server, apiData.place_version, serverLocations);
         }
-        if (apiData.first_seen && !isPrivate) {
+        if (apiData.first_seen && !isPrivate && !getServerUptime(serverId)) {
             const date = new Date(
                 apiData.first_seen.endsWith('Z')
                     ? apiData.first_seen
@@ -1052,8 +1037,7 @@ export async function enhanceServer(server, context) {
             const uptime = isNaN(date)
                 ? 0
                 : Math.max(0, (new Date() - date) / 1000);
-            serverUptimes[serverId] = uptime;
-            displayUptime(server, uptime, serverLocations);
+            displayUptime(server, uptime, true, serverLocations);
         }
         const locParts = [apiData.city, apiData.region, apiData.country].filter(
             Boolean,
@@ -1070,16 +1054,14 @@ export async function enhanceServer(server, context) {
         isServerRegionEnabled ||
         isPlaceVersionEnabled
     ) {
-        if (serverUptimes[serverId] === undefined && !isPrivate) {
-            serverUptimes[serverId] = 'fetching';
+        if (getServerUptime(serverId) === null && !isPrivate) {
             uptimeBatch.add(serverId);
             clearTimeout(server._rovalraUptimeTimeout);
             server._rovalraUptimeTimeout = setTimeout(
                 () => processUptimeBatch(),
                 100,
             );
-        } else if (serverUptimes[serverId] === 'fetching' && !isPrivate) {
-            displayUptime(server, 'fetching', serverLocations);
+            displayUptime(server, 'fetching', true, serverLocations);
         }
     }
 
@@ -1101,6 +1083,7 @@ export async function enhanceServer(server, context) {
             idDiv.className = 'server-id-text text-info xsmall';
 
             const appendTarget =
+                server.querySelector('.rovalra-share-btn-container') ||
                 server.querySelector('.rovalra-copy-join-link') ||
                 server.querySelector('.game-server-join-btn');
             appendTarget
@@ -1121,8 +1104,9 @@ export async function enhanceServer(server, context) {
         const uuidSpan = document.createElement('span');
         uuidSpan.textContent = serverId;
 
-        const hasFriendLink =
-            server.querySelector('.avatar-card-link') !== null;
+        const hasFriendLink = server.hasAttribute(
+            'data-rovalra-is-friend-server',
+        );
         if (hasFriendLink) {
             uuidSpan.classList.add('show-on-hover');
         }

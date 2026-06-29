@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "RoValra - Roblox Improved",
-    "version": "2.4.12.5",
+    "version": "2.5.6",
     "description": "An extension aiming to provide features that other Roblox extensions paywall!",
     "content_scripts": [
         {
@@ -13,10 +13,16 @@
         },
         {
             "matches": ["*://*.roblox.com/*"],
+            "js": ["public/Assets/data/serverid_extractor.js"],
+            "run_at": "document_start",
+            "world": "MAIN"
+        },
+        {
+            "matches": ["*://*.roblox.com/*"],
             "js": ["content.js"],
             "css": ["css/sitewide.css", "css/rovalra.css"],
             "run_at": "document_start",
-            "all_frames": true
+            "all_frames": false
         }
     ],
     "browser_specific_settings": {
@@ -30,7 +36,8 @@
         "https://games.roblox.com/*",
         "*://*.roblox.com/*",
         "https://gamejoin.roblox.com/v1/join-game-instance",
-        "https://users.roblox.com/*"
+        "https://users.roblox.com/*",
+        "https://apis.rovalra.com/*"
     ],
     "background": {
       "scripts": [

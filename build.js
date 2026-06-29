@@ -1,6 +1,7 @@
 const esbuild = require('esbuild');
 const fs = require('fs');
 const path = require('path');
+const yaml = require('yaml');
 let sass = null;
 try {
     sass = require('sass');
@@ -14,6 +15,27 @@ const dracoPath = path.join(
     'dist',
     'draco_decoder.js',
 );
+const swaggerUiCssPath = path.join(
+    __dirname,
+    'node_modules',
+    'swagger-ui-dist',
+    'swagger-ui.css',
+);
+const backgroundEntryPath = path.join(
+    __dirname,
+    'src',
+    'background',
+    'background.js',
+);
+const interceptEntryPath = path.join(
+    __dirname,
+    'src',
+    'content',
+    'core',
+    'xhr',
+    'intercept.js',
+);
+const contentEntryPath = path.join(__dirname, 'src', 'content', 'index.js');
 
 const manifestPath = path.join(__dirname, 'manifest.json');
 const packagePath = path.join(__dirname, 'package.json');
@@ -80,16 +102,7 @@ function compileScssFile(inputFile, outputFile) {
 esbuild
     .build({
         ...commonConfig,
-        entryPoints: ['src/content/index.js'],
-        outfile: 'dist/content.js',
-        bundle: true,
-    })
-    .catch(() => process.exit(1));
-
-esbuild
-    .build({
-        ...commonConfig,
-        entryPoints: ['src/background/background.js'],
+        entryPoints: [backgroundEntryPath],
         outfile: 'dist/background.js',
         bundle: true,
     })
@@ -98,7 +111,7 @@ esbuild
 esbuild
     .build({
         ...commonConfig,
-        entryPoints: ['src/content/core/xhr/intercept.js'],
+        entryPoints: [interceptEntryPath],
         outfile: 'dist/intercept.js',
         bundle: false,
     })
@@ -119,6 +132,24 @@ if (sass && fs.existsSync(cssDir)) {
             );
             console.log(
                 'Compiled SCSS: src/css/main.scss -> dist/css/rovalra.css',
+            );
+        } catch (e) {
+            console.error('SCSS Compilation Failed:', e.message);
+        }
+    }
+
+    const sitewideScss = path.join(cssDir, 'sitewide.scss');
+    if (fs.existsSync(sitewideScss)) {
+        try {
+            const result = sass.compile(sitewideScss, { style: 'expanded' });
+            if (!fs.existsSync('dist/css'))
+                fs.mkdirSync('dist/css', { recursive: true });
+            fs.writeFileSync(
+                'dist/css/sitewide.css',
+                bannerText + '\n' + result.css,
+            );
+            console.log(
+                'Compiled SCSS: src/css/sitewide.scss -> dist/css/sitewide.css',
             );
         } catch (e) {
             console.error('SCSS Compilation Failed:', e.message);
@@ -157,7 +188,7 @@ const dracoSource = fs.readFileSync(dracoPath, 'utf8');
 esbuild
     .build({
         ...commonConfig,
-        entryPoints: ['src/content/index.js'],
+        entryPoints: [contentEntryPath],
         outfile: 'dist/content.js',
         bundle: true,
         // This injects Draco directly into the content script context for roavatar-renderer
@@ -183,6 +214,16 @@ if (fs.existsSync(cssDir)) {
     }
 }
 
+if (fs.existsSync(swaggerUiCssPath)) {
+    if (!fs.existsSync('dist/css'))
+        fs.mkdirSync('dist/css', { recursive: true });
+    fs.copyFileSync(swaggerUiCssPath, 'dist/css/swagger-ui.css');
+    console.log('Copied Swagger UI CSS: dist/css/swagger-ui.css');
+} else {
+    console.error(`Error: swagger-ui.css not found at ${swaggerUiCssPath}`);
+    process.exit(1);
+}
+
 function processDirectory(src, dest) {
     if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
 
@@ -197,7 +238,7 @@ function processDirectory(src, dest) {
         } else {
             const ext = path.extname(entry.name).toLowerCase();
 
-            if (ext === '.js' || ext === '.css') {
+            if (ext === '.js' || ext === '.css' || ext === '.ts') {
                 try {
                     const content = fs.readFileSync(srcPath, 'utf8');
 
@@ -219,6 +260,17 @@ function processDirectory(src, dest) {
                         err,
                     );
                     fs.copyFileSync(srcPath, destPath);
+                }
+            } else if (ext === '.yaml') {
+                try {
+                    const data = yaml.parse(fs.readFileSync(srcPath, 'utf8'));
+                    fs.writeFileSync(
+                        destPath.slice(0, destPath.length - 4) + 'json',
+                        JSON.stringify(data, undefined, ' '),
+                    );
+                } catch (err) {
+                    console.error(`Error processing ${entry.name}.`, err);
+                    throw err;
                 }
             } else {
                 fs.copyFileSync(srcPath, destPath);

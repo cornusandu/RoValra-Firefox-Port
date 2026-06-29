@@ -6,16 +6,17 @@
 * [X] chrome.runtime.onInstalled.addListener
 * [X] chrome.runtime.onStartup.addListener
 * [X] chrome.runtime.getManifest
+* [X] chrome.runtime.lastError
 
 ## chrome.storage
-* [ ] chrome.storage.local.set
-* [ ] chrome.storage.local.get
-* [ ] chrome.storage.local.remove
-* [ ] chrome.storage.session.set
-* [ ] chrome.storage.session.get
-* [ ] chrome.storage.session.setAccessLevel
-* [ ] chrome.storage.sync.set
-* [ ] chrome.storage.sync.get
+* [X] chrome.storage.local.set
+* [X] chrome.storage.local.get
+* [X] chrome.storage.local.remove
+* [X] chrome.storage.session.set
+* [X] chrome.storage.session.get
+* [X] chrome.storage.session.setAccessLevel
+* [X] chrome.storage.sync.set
+* [X] chrome.storage.sync.get
 * [X] chrome.storage.onChanged.addListener
 
 ## chrome.permissions

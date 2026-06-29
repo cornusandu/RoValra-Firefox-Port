@@ -89,6 +89,14 @@ async function fetchBatchData(
             path: '/v1/users/avatar-headshot',
             idParam: 'userIds',
         },
+        Avatar: {
+            path: '/v1/users/avatar',
+            idParam: 'userIds',
+        },
+        AvatarBust: {
+            path: '/v1/users/avatar-bust',
+            idParam: 'userIds',
+        },
 
         GameThumbnail: { path: '/v1/games', idParam: 'placeIds' },
         GameIcon: { path: '/v1/games/icons', idParam: 'universeIds' },
@@ -135,7 +143,7 @@ async function fetchBatchData(
     return results;
 }
 
-export async function fetchThumbnails(
+async function fetchThumbnailsDirect(
     items,
     type,
     size = '150x150',
@@ -280,6 +288,29 @@ export async function fetchThumbnails(
     return thumbnailMap;
 }
 
+export async function fetchThumbnails(
+    items,
+    type,
+    size = '150x150',
+    isCircular = false,
+    signal,
+) {
+    if (isCircular || signal) {
+        return fetchThumbnailsDirect(items, type, size, isCircular, signal);
+    }
+
+    const results = await Promise.all(
+        items.map((item) => getQueuedThumbnail(item.id, type, size)),
+    );
+
+    const thumbnailMap = new Map();
+    items.forEach((item, index) => {
+        const id = type === 'PlayerToken' ? item.id : Number(item.id);
+        thumbnailMap.set(id, results[index]);
+    });
+    return thumbnailMap;
+}
+
 export function createThumbnailElement(
     thumbnailData,
     altText,
@@ -293,6 +324,31 @@ export function createThumbnailElement(
         thumbnailData &&
         (thumbnailData.thumbnailType === 'AvatarHeadshot' ||
             thumbnailData.thumbnailType === 'PlayerToken');
+
+    const createCenteredIcon = (iconClass) => {
+        const container = document.createElement('div');
+        container.className = 'thumbnail-2d-container';
+        container.style.backgroundColor = 'var(--rovalra-icon-blocked-color)';
+        container.style.display = 'flex';
+        container.style.alignItems = 'center';
+        container.style.justifyContent = 'center';
+        container.style.borderRadius = isAvatar ? '50%' : '8px';
+
+        const icon = document.createElement('span');
+        icon.className = iconClass;
+        Object.assign(icon.style, {
+            width: '100%',
+            height: '100%',
+            display: 'inline-block',
+            backgroundRepeat: 'no-repeat',
+            backgroundPosition: 'center',
+            backgroundSize: 'contain',
+        });
+        container.appendChild(icon);
+        return applyStyles(container);
+    };
+    // Extra icons incase we need them later
+    // icon-pending, icon-unknown, icon-in-review
 
     const applyStyles = (el) => {
         el.alt = altText;
@@ -308,10 +364,7 @@ export function createThumbnailElement(
     }
 
     if (state === 'Blocked') {
-        thumbnailElement = document.createElement('div');
-        thumbnailElement.className = 'thumbnail-2d-container icon-blocked';
-        thumbnailElement.style.borderRadius = isAvatar ? '50%' : '8px';
-        return applyStyles(thumbnailElement);
+        return createCenteredIcon('icon-blocked');
     }
 
     if (state === 'Pending' || state === 'InReview') {
@@ -350,19 +403,30 @@ export function createThumbnailElement(
                             container.parentNode.replaceChild(img, container);
                         }
                     } else if (updatedData.state === 'Blocked') {
-                        container.className =
-                            'thumbnail-2d-container icon-blocked';
+                        container.style.display = 'flex';
+                        container.style.alignItems = 'center';
+                        container.style.justifyContent = 'center';
+                        container.style.backgroundColor = '#393b3d';
+                        container.innerHTML =
+                            '<span class="icon-blocked" style="width: 100%; height: 100%; display: inline-block; background-repeat: no-repeat; background-position: center; background-size: contain;"></span>';
                         container.classList.remove('shimmer');
                     } else {
-                        container.className =
-                            'thumbnail-2d-container icon-broken';
-                        container.style.borderRadius = isAvatar ? '50%' : '8px';
+                        container.style.display = 'flex';
+                        container.style.alignItems = 'center';
+                        container.style.justifyContent = 'center';
+                        container.style.backgroundColor = '#393b3d';
+                        container.innerHTML =
+                            '<span class="icon-broken" style="width: 100%; height: 100%; display: inline-block; background-repeat: no-repeat; background-position: center; background-size: contain;"></span>';
                         container.classList.remove('shimmer');
                     }
                 })
                 .catch(() => {
-                    container.className = 'thumbnail-2d-container icon-broken';
-                    container.style.borderRadius = isAvatar ? '50%' : '8px';
+                    container.style.display = 'flex';
+                    container.style.alignItems = 'center';
+                    container.style.justifyContent = 'center';
+                    container.style.backgroundColor = '#393b3d';
+                    container.innerHTML =
+                        '<span class="icon-broken" style="width: 100%; height: 100%; display: inline-block; background-repeat: no-repeat; background-position: center; background-size: contain;"></span>';
                     container.classList.remove('shimmer');
                 });
         }
@@ -370,10 +434,7 @@ export function createThumbnailElement(
         return container;
     }
 
-    thumbnailElement = document.createElement('div');
-    thumbnailElement.className = 'thumbnail-2d-container icon-broken';
-    thumbnailElement.style.borderRadius = isAvatar ? '50%' : '8px';
-    return applyStyles(thumbnailElement);
+    return createCenteredIcon('icon-broken');
 }
 
 export async function getBatchThumbnails(ids, type, size = '150x150') {
@@ -507,4 +568,71 @@ export function renderAvatarThumbnail(userId) {
         thumbnailType: 'Avatar',
         finalUpdate: fetchRender(),
     };
+}
+
+export async function fetchPromotionalThumbnails(universeId) {
+    try {
+        const response = await callRobloxApi({
+            subdomain: 'thumbnails',
+            endpoint: `/v1/games/multiget/thumbnails?universeIds=${universeId}&countPerUniverse=100&defaults=true&size=768x432&format=Png&isCircular=false`,
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            const thumbnails = data.data?.[0]?.thumbnails || [];
+            thumbnails.forEach((t) => (t.thumbnailType = 'GameThumbnail'));
+            return thumbnails;
+        }
+    } catch (e) {
+        console.error('RoValra Thumbnails: Promotional fetch failed', e);
+    }
+    return [];
+}
+
+const thumbQueue = new Map();
+let thumbTimer = null;
+
+async function flushThumbQueue() {
+    const currentQueues = Array.from(thumbQueue.entries());
+    thumbQueue.clear();
+    thumbTimer = null;
+
+    await Promise.all(
+        currentQueues.map(async ([key, queueMap]) => {
+            const [type, size] = key.split(':');
+            const ids = Array.from(queueMap.keys());
+            if (ids.length === 0) return;
+
+            try {
+                const thumbMap = await fetchThumbnailsDirect(
+                    ids.map((id) => ({ id })),
+                    type,
+                    size,
+                );
+                ids.forEach((id) => {
+                    const resolvers = queueMap.get(id);
+                    const result = thumbMap.get(id);
+                    resolvers.forEach((res) => res(result));
+                });
+            } catch (e) {
+                ids.forEach((id) =>
+                    queueMap.get(id).forEach((res) => res(null)),
+                );
+            }
+        }),
+    );
+}
+
+export function getQueuedThumbnail(id, type, size = '150x150') {
+    return new Promise((resolve) => {
+        const normalizedId = type === 'PlayerToken' ? id : Number(id);
+        const key = `${type}:${size}`;
+        if (!thumbQueue.has(key)) thumbQueue.set(key, new Map());
+        const typeQueue = thumbQueue.get(key);
+
+        if (!typeQueue.has(normalizedId)) typeQueue.set(normalizedId, []);
+        typeQueue.get(normalizedId).push(resolve);
+
+        if (!thumbTimer) thumbTimer = setTimeout(flushThumbQueue, 50);
+    });
 }

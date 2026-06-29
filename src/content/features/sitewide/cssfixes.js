@@ -1,4 +1,6 @@
 import { observeElement } from '../../core/observer.js';
+import { getPlaceIdFromUrl } from '../../core/idExtractor.js';
+import { getAuthenticatedUserId } from '../../core/user.js';
 
 const applyImpersonateAttribute = (headerContainer) => {
     chrome.storage.local.get('impersonateRobloxStaffSetting', function (data) {
@@ -138,8 +140,6 @@ const applyProfileGameCardFix = () => {
             height: 250px !important;
             overflow: visible !important;
         }
-
-
     `;
     const style = document.createElement('style');
     style.textContent = css;
@@ -154,11 +154,16 @@ const applyProfileGameCardFix = () => {
 
                 try {
                     const link = originalCard.querySelector('.game-card-link');
-                    if (!link || !link.id) return;
+                    if (!link) return;
 
-                    const universeId = link.id;
+                    const universeId = link.id || link.dataset.universeId;
+                    const placeId = getPlaceIdFromUrl(link.href);
 
-                    const newCard = createGameCard({ gameId: universeId });
+                    if (!universeId && !placeId) return;
+
+                    const newCard = universeId
+                        ? createGameCard({ gameId: universeId })
+                        : createGameCard({ placeId: placeId });
                     originalCard.innerHTML = '';
                     originalCard.appendChild(newCard);
                 } catch (e) {
@@ -171,6 +176,35 @@ const applyProfileGameCardFix = () => {
             { multiple: true },
         );
     });
+};
+
+// Cuz RoSeal is broken and im the only one having this issue i have to fix it myself 🙄
+const applyFriendsCarouselPaddingFix = async () => {
+    const userId = await getAuthenticatedUserId();
+
+    if (userId !== 447170745) return;
+
+    observeElement(
+        '.react-friends-carousel-container.roseal-friends-carousel-container',
+        () => {
+            const css = `
+            .friends-carousel-container {
+                padding: 0 !important;
+            }
+        `;
+            const style = document.createElement('style');
+            style.setAttribute('data-rovalra-friends-carousel-fix', 'true');
+            style.textContent = css;
+
+            if (
+                !document.querySelector(
+                    'style[data-rovalra-friends-carousel-fix]',
+                )
+            ) {
+                document.head.appendChild(style);
+            }
+        },
+    );
 };
 
 export function init() {
@@ -187,6 +221,7 @@ export function init() {
                 applyGameTitleFix();
                 applyCartRemoveButtonFix();
                 applyProfileGameCardFix();
+                applyFriendsCarouselPaddingFix();
             }
         },
     );

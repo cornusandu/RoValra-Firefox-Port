@@ -23,18 +23,30 @@ import {
     enableAllCategories,
 } from './categorizeWearing.js';
 import { injectStylesheet } from '../../core/ui/cssInjector.js';
+import { getLastClickedUrl } from '../../core/utils/trackers/urlTracker.js';
 
 export function init() {
     chrome.storage.local.get(
         {
-            bannedUserDetectionEnabled: false,
+            bannedUserViewerEnabled: false,
+            bannedUserDetectionFallbackEnabled: false,
+            bannedUserDetectionEnabled: 'CHECK_FOR_CLEANUP',
             categorizeWearingEnabled: true,
         },
         async (data) => {
-            if (!data.bannedUserDetectionEnabled) return;
+            if (data.bannedUserDetectionEnabled !== 'CHECK_FOR_CLEANUP') {
+                chrome.storage.local.remove('bannedUserDetectionEnabled');
+            }
+
+            if (!data.bannedUserViewerEnabled) return;
+
+            const localeMatch = window.location.pathname.match(
+                /^\/([a-z]{2}(?:-[a-z]{2})?)(?=\/|$)/i,
+            );
+            const localePrefix = localeMatch ? `/${localeMatch[1]}` : '';
 
             const bannedUrlMatch = window.location.pathname.match(
-                /\/banned-users\/(\d+)\/profile/,
+                /^(?:\/[a-z]{2}(?:-[a-z]{2})?)?\/banned-users\/(\d+)\/profile/,
             );
             if (bannedUrlMatch) {
                 const userId = bannedUrlMatch[1];
@@ -105,6 +117,16 @@ export function init() {
                 return;
             }
 
+            const checkUrlMatch = window.location.pathname.match(
+                /^(?:\/[a-z]{2}(?:-[a-z]{2})?)?\/banned-user\/(\d+)\/profile/,
+            );
+            if (checkUrlMatch) {
+                const userId = checkUrlMatch[1];
+                const newUrl = `${window.location.origin}${localePrefix}/banned-users/${userId}/profile`;
+                window.location.replace(newUrl);
+                return;
+            }
+
             const isErrorPage =
                 window.location.pathname.includes('/request-error') ||
                 document.title.includes('Page not found') ||
@@ -151,7 +173,7 @@ export function init() {
                         if (user && user.isBanned) {
                             user.isVerified = profile?.isVerified || false;
 
-                            const newUrl = `https://www.roblox.com/banned-users/${user.id}/profile`;
+                            const newUrl = `${localePrefix}/banned-users/${user.id}/profile`;
                             window.history.replaceState({}, '', newUrl);
 
                             renderBannedUserProfile(user, data);
@@ -170,32 +192,50 @@ export function init() {
                                 isBanned: true,
                                 isAccountForgotten: true,
                             };
-                            const newUrl = `https://www.roblox.com/banned-users/${syntheticUser.id}/profile`;
+                            const newUrl = `${localePrefix}/banned-users/${syntheticUser.id}/profile`;
                             window.history.replaceState({}, '', newUrl);
                             renderBannedUserProfile(syntheticUser, data);
                         }
                     });
             }
 
-            chrome.runtime.sendMessage(
-                { action: 'getBannedUserRedirect' },
-                (response) => {
-                    if (response && response.userId) {
-                        handleBannedRedirect(response.userId);
-                        return;
+            (async () => {
+                if (isErrorPage) {
+                    const lastUrl = await getLastClickedUrl();
+                    if (lastUrl) {
+                        const path = lastUrl.includes('://')
+                            ? new URL(lastUrl).pathname
+                            : lastUrl;
+                        const userUrlMatch = path.match(
+                            /users\/(\d+)\/profile/,
+                        );
+
+                        if (userUrlMatch) {
+                            handleBannedRedirect(userUrlMatch[1]);
+                            return;
+                        }
                     }
 
-                    if (!isErrorPage) return;
-
-                    chrome.runtime.sendMessage(
-                        { action: 'getBannedUserRedirect' },
-                        (r2) => {
-                            if (r2 && r2.userId)
-                                handleBannedRedirect(r2.userId);
-                        },
-                    );
-                },
-            );
+                    if (data.bannedUserDetectionFallbackEnabled) {
+                        chrome.runtime.sendMessage(
+                            { action: 'getBannedUserRedirect' },
+                            (response) => {
+                                if (response && response.userId) {
+                                    handleBannedRedirect(response.userId);
+                                } else {
+                                    chrome.runtime.sendMessage(
+                                        { action: 'getBannedUserRedirect' },
+                                        (r2) => {
+                                            if (r2 && r2.userId)
+                                                handleBannedRedirect(r2.userId);
+                                        },
+                                    );
+                                }
+                            },
+                        );
+                    }
+                }
+            })();
         },
     );
 }
@@ -326,7 +366,7 @@ async function renderBannedUserProfile(user, settings) {
                     <div id="rovalra-banned-creations-content" class="tab-pane">
                         <div class="profile-game section container-list">
                             <div class="container-header"><h3>${ts('bannedUsers.experiences')}</h3></div>
-                            <div class="game-grid"><ul id="rovalra-banned-creations-list" class="hlist game-cards" style="display: flex; flex-wrap: wrap; gap: 12px; list-style: none; padding: 0;"></ul></div>
+                            <div class="game-grid"><div id="rovalra-banned-creations-list" class="css-1i465w8-carousel" style="display: flex; flex-wrap: wrap; gap: 12px; padding: 0;"></div></div>
                         </div>
                     </div>
                 </div>
@@ -351,11 +391,21 @@ async function renderBannedUserProfile(user, settings) {
     };
 
     const handleRenderFallback = () => {
-        const renderThumb = renderAvatarThumbnail(user.id);
+        const renderThumb = renderAvatarThumbnail
+            ? renderAvatarThumbnail(user.id)
+            : null;
+        if (!renderThumb) return;
 
         const originalPromise = renderThumb.finalUpdate;
+        if (!originalPromise) {
+            updateAvatarUI(renderThumb, renderStyles);
+            return;
+        }
+
         renderThumb.finalUpdate = originalPromise.then((result) => {
             if (result) return result;
+
+            if (user.isAccountForgotten) return null;
 
             return {
                 state: 'Completed',
@@ -394,7 +444,13 @@ async function renderBannedUserProfile(user, settings) {
     const redirectBannedUrl = (e) => {
         if (!currentUser) return;
         e.preventDefault();
-        const bannedUrl = `/banned-users/${currentUser}/profile`;
+
+        const lMatch = window.location.pathname.match(
+            /^\/([a-z]{2}(?:-[a-z]{2})?)(?=\/|$)/i,
+        );
+        const lPrefix = lMatch ? `/${lMatch[1]}` : '';
+
+        const bannedUrl = `${lPrefix}/banned-users/${currentUser}/profile`;
         window.history.pushState({}, '', bannedUrl);
     };
 
@@ -416,10 +472,6 @@ async function renderBannedUserProfile(user, settings) {
                 activePane.style.display = 'block';
             }
         });
-    });
-
-    content.querySelectorAll('#rovalra-banned-stat-pills a').forEach((link) => {
-        link.addEventListener('click', (e) => redirectBannedUrl(e));
     });
 
     content
@@ -772,7 +824,7 @@ async function loadFriends(userId) {
                     </div>
                     <div class="friends-carousel-container">
                         <div class="friends-carousel-list-container">
-                            <div id="rovalra-banned-friends-list" style="display: flex; gap: 45px; overflow-x: auto; padding-bottom: 10px;"></div>
+                            <div id="rovalra-banned-friends-list" style="display: flex; gap: 35px; overflow-x: auto; padding-bottom: 10px;"></div>
                         </div>
                     </div>
                 </div>
@@ -1071,15 +1123,19 @@ async function loadExperiences(userId) {
         creationsList.innerHTML = '';
         if (userGames.length > 0) {
             userGames.forEach((game) => {
-                const li = document.createElement('li');
-                li.className = 'list-item game-card game-tile';
-                li.appendChild(
+                const itemWrapper = document.createElement('div');
+                itemWrapper.id = 'collection-carousel-item';
+                itemWrapper.className = 'css-1anzfxy-carouselItem';
+                itemWrapper.style.flexShrink = '0';
+                itemWrapper.style.width = '150px';
+                itemWrapper.appendChild(
                     createGameCard({
                         gameId: game.id,
                         placeId: game.rootPlace?.id,
+                        game: game,
                     }),
                 );
-                creationsList.appendChild(li);
+                creationsList.appendChild(itemWrapper);
             });
         } else {
             creationsList.innerHTML = `<p class="no-results-message">${ts('bannedUsers.noExperiences')}</p>`; //Verified

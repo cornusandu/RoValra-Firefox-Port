@@ -4,10 +4,14 @@ import { createConfetti } from '../../../core/fun/confetti.js';
 import { BADGE_CONFIG } from '../../../core/configs/badges.js';
 import { callRobloxApiJson } from '../../../core/api.js';
 import { createSquareButton } from '../../../core/ui/profile/header/squarebutton.js';
-import { getAssets } from '../../../core/assets.js';
 import { getUserIdFromUrl } from '../../../core/idExtractor.js';
-import { t } from '../../../core/locale/i18n.js';
+import { getAuthenticatedUserId } from '../../../core/user.js';
 const badgeCache = new Map();
+
+function applyBadgeIconStyle(icon, badge) {
+    icon.style.filter = '';
+    Object.assign(icon.style, badge.style || {});
+}
 
 function ensureShineStyle() {
     if (document.getElementById('rovalra-badge-shine-style')) return;
@@ -19,8 +23,85 @@ function ensureShineStyle() {
             40% { left: 200%; }
             100% { left: 200%; }
         }
+
+        @keyframes rovalra-badge-sparkle-float {
+            0%, 100% {
+                opacity: 0;
+                transform: scale(0.35) rotate(45deg);
+            }
+            35% {
+                opacity: 1;
+                transform: scale(1) rotate(45deg);
+            }
+            65% {
+                opacity: 0.85;
+                transform: scale(0.8) rotate(45deg);
+            }
+        }
     `; //Verified
     document.head.appendChild(style);
+}
+
+function randomizeSparklePosition(sparkle) {
+    sparkle.style.top = '';
+    sparkle.style.right = '';
+    sparkle.style.bottom = '';
+    sparkle.style.left = '';
+
+    const sideOffset = `${Math.round(Math.random() * 64 + 18)}%`;
+    const horizontalOffset = `${Math.round(Math.random() * 76 + 12)}%`;
+    const sideEdgeDistance = `${Math.round(Math.random() * 4) - 7}px`;
+    const verticalEdgeDistance = `${Math.round(Math.random() * 4) - 3}px`;
+
+    switch (Math.floor(Math.random() * 4)) {
+        case 0:
+            sparkle.style.top = verticalEdgeDistance;
+            sparkle.style.left = horizontalOffset;
+            break;
+        case 1:
+            sparkle.style.right = sideEdgeDistance;
+            sparkle.style.top = sideOffset;
+            break;
+        case 2:
+            sparkle.style.bottom = verticalEdgeDistance;
+            sparkle.style.left = horizontalOffset;
+            break;
+        default:
+            sparkle.style.left = sideEdgeDistance;
+            sparkle.style.top = sideOffset;
+            break;
+    }
+}
+
+function addFloatingSparkles(iconContainer) {
+    const sparkles = [
+        { size: '4px', delay: '0s' },
+        { size: '3px', delay: '0.55s' },
+        { size: '3px', delay: '1.1s' },
+        { size: '4px', delay: '1.65s' },
+    ];
+
+    sparkles.forEach((config) => {
+        const sparkle = document.createElement('span');
+        Object.assign(sparkle.style, {
+            position: 'absolute',
+            width: config.size,
+            height: config.size,
+            background: 'currentColor',
+            border: '1px solid color-mix(in srgb, currentColor 55%, white)',
+            boxShadow: '0 0 5px currentColor',
+            pointerEvents: 'none',
+            zIndex: '3',
+            animation: `rovalra-badge-sparkle-float 2.2s ease-in-out ${config.delay} infinite`,
+        });
+
+        randomizeSparklePosition(sparkle);
+        sparkle.addEventListener('animationiteration', () => {
+            randomizeSparklePosition(sparkle);
+        });
+
+        iconContainer.appendChild(sparkle);
+    });
 }
 
 function createHeaderBadge(parentContainer, badge) {
@@ -32,17 +113,42 @@ function createHeaderBadge(parentContainer, badge) {
         alignItems: 'center',
         marginLeft: '0px',
         verticalAlign: 'middle',
+        overflow: 'visible',
+        color: badge.themeColorIcon ? 'var(--rovalra-main-text-color)' : '',
     });
 
-    const icon = document.createElement('img');
-    icon.src = badge.icon;
+    if (badge.id === 'contributor') {
+        iconContainer.style.paddingLeft = '5px';
+    }
+
+    const icon = document.createElement(badge.themeColorIcon ? 'span' : 'img');
+    if (badge.iconAssetName) {
+        if (badge.themeColorIcon) {
+            icon.dataset.rovalraAssetMask = badge.iconAssetName;
+        } else {
+            icon.dataset.rovalraAsset = badge.iconAssetName;
+        }
+    }
+    if (badge.id) {
+        icon.dataset.rovalraBadgeConfig = badge.id;
+    }
+    if (badge.themeColorIcon) {
+        Object.assign(icon.style, {
+            display: 'inline-block',
+            backgroundColor: 'currentColor',
+            webkitMask: `url("${badge.icon}") center / contain no-repeat`,
+            mask: `url("${badge.icon}") center / contain no-repeat`,
+        });
+    } else {
+        icon.src = badge.icon;
+    }
     icon.dataset.badgeId = badge.tooltip || 'badge';
     Object.assign(icon.style, {
         width: badge.size || 'var(--icon-size-large)',
         height: badge.size || 'var(--icon-size-large)',
         cursor: 'pointer',
-        ...badge.style,
     });
+    applyBadgeIconStyle(icon, badge);
 
     if (badge.confetti) {
         icon.addEventListener('click', (e) => {
@@ -64,6 +170,9 @@ function createHeaderBadge(parentContainer, badge) {
     if (badge.shiny) {
         ensureShineStyle();
         const shineContainer = document.createElement('div');
+        if (badge.iconAssetName) {
+            shineContainer.dataset.rovalraAssetMask = badge.iconAssetName;
+        }
         Object.assign(shineContainer.style, {
             position: 'absolute',
             top: '0',
@@ -81,16 +190,26 @@ function createHeaderBadge(parentContainer, badge) {
             position: 'absolute',
             top: '0',
             left: '-100%',
-            width: '50%',
+            width: badge.grayGlimmer ? '70%' : '50%',
             height: '100%',
             background:
-                'linear-gradient(to right, transparent, rgba(255,255,255,0.8), transparent)',
+                badge.grayGlimmer
+                    ? 'linear-gradient(to right, transparent, rgba(70, 70, 70, 0.8), rgba(145, 145, 145, 0.75), transparent)'
+                    : 'linear-gradient(to right, transparent, rgba(255,255,255,0.8), transparent)',
+            mixBlendMode: badge.grayGlimmer ? 'multiply' : '',
             transform: 'skewX(-25deg)',
-            animation: 'rovalra-badge-shine-move 5s infinite',
+            animation: badge.grayGlimmer
+                ? 'rovalra-badge-shine-move 3.2s infinite'
+                : 'rovalra-badge-shine-move 5s infinite',
         });
 
         shineContainer.appendChild(shineBar);
         iconContainer.appendChild(shineContainer);
+    }
+
+    if (badge.sparkles) {
+        ensureShineStyle();
+        addFloatingSparkles(iconContainer);
     }
 
     iconContainer.appendChild(icon);
@@ -165,27 +284,13 @@ async function addHeaderBadges(container) {
     container.dataset.rovalraBusy = 'true';
 
     try {
-        let data = badgeCache.get(currentUserId);
+        const authenticatedUserId = await getAuthenticatedUserId();
+        const isOwnProfile =
+            authenticatedUserId &&
+            String(authenticatedUserId) === String(currentUserId);
+
+        let data = isOwnProfile ? null : badgeCache.get(currentUserId);
         if (!data) {
-            const settings = await new Promise((r) =>
-                chrome.storage.local.get(
-                    { idVerificationBadgeEnabled: true },
-                    r,
-                ),
-            );
-
-            let verification = null;
-            if (settings.idVerificationBadgeEnabled) {
-                try {
-                    const res = await callRobloxApiJson({
-                        subdomain: 'apis',
-                        endpoint: `/talent/v1/users/verification?userIds=${currentUserId}`,
-                        method: 'GET',
-                    });
-                    verification = res?.data?.[0];
-                } catch (e) {}
-            }
-
             let apiBadges = [];
             try {
                 const res = await callRobloxApiJson({
@@ -193,12 +298,13 @@ async function addHeaderBadges(container) {
                     subdomain: 'apis',
                     endpoint: `/v1/users/${currentUserId}/badges`,
                     method: 'GET',
+                    noCache: isOwnProfile,
                 });
                 if (res?.status === 'success') apiBadges = res.badges;
-            } catch (e) {}
+            } catch {}
 
-            data = { verification, apiBadges };
-            badgeCache.set(currentUserId, data);
+            data = { apiBadges };
+            if (!isOwnProfile) badgeCache.set(currentUserId, data);
         }
 
         container
@@ -206,22 +312,6 @@ async function addHeaderBadges(container) {
             .forEach((b) => b.remove());
 
         const badgesToRender = [];
-        if (data.verification) {
-            const assets = getAssets();
-            badgesToRender.push({
-                isIcon: true,
-                config: data.verification.isVerified
-                    ? {
-                          icon: assets.verifiedShield,
-                          tooltip: await t('rovalraBadges.userVerified'),
-                      }
-                    : {
-                          icon: assets.UnverifiedShield,
-                          tooltip: await t('rovalraBadges.userNotVerified'),
-                      },
-            });
-        }
-
         for (const key in BADGE_CONFIG) {
             const b = BADGE_CONFIG[key];
             if (b.type === 'header' && b.userIds.includes(currentUserId)) {
@@ -310,6 +400,16 @@ async function addProfileBadgeButtons(buttonContainer) {
 }
 
 export function init() {
+    document.addEventListener('rovalra:assetsUpdated', () => {
+        document
+            .querySelectorAll('[data-rovalra-badge-config]')
+            .forEach((icon) => {
+                const badge = BADGE_CONFIG[icon.dataset.rovalraBadgeConfig];
+                if (!badge) return;
+                applyBadgeIconStyle(icon, badge);
+            });
+    });
+
     chrome.storage.local.get({ RoValraBadgesEnable: true }, (settings) => {
         if (!settings.RoValraBadgesEnable) return;
 
@@ -340,7 +440,7 @@ export function init() {
         );
 
         observeElement(
-            '.flex.gap-small.buttons-show-on-desktop',
+            'div.button-container.flex.gap-small',
             addProfileBadgeButtons,
             { multiple: true },
         );
