@@ -139,6 +139,11 @@ globalThis.chrome = proxifyChrome({
              */
             remove: async function remove(keys, cb) {
                 return tocallback(browser.storage.local.remove(keys), cb, () => undefined);
+            },
+            onChanged: {
+                addListener: function addLocalChangedListener(listener) {
+                    browser.storage.local.onChanged.addListener(listener);
+                }
             }
         },
         session: {
