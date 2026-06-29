@@ -10,18 +10,24 @@ interface APIRequest extends RequestInit {
     [key: string]: unknown
 };
 
-browser.runtime.onMessage.addListener(async (message, sender) => {
-    if (message.rovid === "rovalra-mkapi") {
-        const args: APIRequest = message.data?.args ?? {};
-
-        if (args.headers === undefined) args.headers = {};
-
-        args.headers['X-Dev-Origin'] = String(sender.tab?.id);
-        args.headers['X-Dev-Origin-TabID'] = await sha256(JSON.stringify( { extension: 'RoValra-Firefox', TabID: sender.tab?.id ?? -1 } ));
-        args.headers['X-Dev-OS'] = (await getPlatform())?.printos ?? "(Undefined)";
-
-        const response = await fetch(message.data?.target, args);
-
-        return serialiseAPIResponse(response);
+browser.runtime.onMessage.addListener((message, sender) => {
+    if (message?.rovid !== 'rovalra-mkapi') {
+        return false;
     }
+
+    return handleApiRequest(message, sender);
 });
+
+async function handleApiRequest(message: any, sender: browser.runtime.MessageSender) {
+    try {
+        const response = await fetch(
+            message.data.target,
+            message.data.args ?? {},
+        );
+
+        return await serialiseAPIResponse(response);
+    } catch (e) {
+        console.error(`Background/Sub/Net/MkApi/handleApiRequest: Unknown error type`, e);
+        throw e;
+    }
+}
