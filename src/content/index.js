@@ -18,6 +18,8 @@ window.fetch = async function newFetch(input, init) {
     return deserialiseAPIResponse(serialised);
 }
 
+window.fetch = window.fetch.bind(window);
+
 import { initializeObserver, startObserving } from './core/observer.js';
 import { detectTheme, dispatchThemeEvent } from './core/theme.js';
 import { getValidAccessToken } from './core/oauth/oauth.js';
