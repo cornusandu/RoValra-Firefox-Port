@@ -169,7 +169,10 @@ globalThis.chrome = proxifyChrome({
              * @returns {Promise<void | null>}
              */
             setAccessLevel: async function setAccessLevel(accessLevel, cb) {
-                if (typeof browser.storage.session.setAccessLevel === "function") {
+                console.warn(`Firefox does not support browser.storage.<area>.setAccessLevel`);
+                return;
+                
+                if (typeof browser.storage.session.setAccessLevel === "function" || browser.storage.session.setAccessLevel === undefined) {
                     if (!browser?.storage?.session?.setAccessLevel)
                         console.error(`browser?.storage?.session?.setAccessLevel = ${browser?.storage?.session?.setAccessLevel}`);
                     return tocallback(browser.storage.session.setAccessLevel(accessLevel.accessLevel), cb, () => undefined);
@@ -235,6 +238,12 @@ globalThis.chrome = proxifyChrome({
          */
         updateDynamicRules: function updateDynamicRules(options, cb) {
             return tocallback(browser.declarativeNetRequest.updateDynamicRules(options), cb);
+        }
+    },
+    webRequest: browser.webRequest !== undefined ? {} : undefined,
+    tabs: {
+        query: function queryTabs(queryOptions, cb) {
+            return tocallback(browser.tabs.query(queryOptions), cb);
         }
     }
 });
