@@ -155,11 +155,13 @@ globalThis.chrome = proxifyChrome({
         },
         session: {
             set: async function set(data, cb) {
+                console.warn(`Using session storage. This has not yet been moved to the background script. Expect errors.`);
                 if (ISDEBUG)
                     console.debug(`globalThis.storage.local.set call with data=\`${data}\``);
                 return tocallback(browser.storage.session.set(data), cb, () => undefined);
             },
             get: async function get(keys, cb) {
+                console.warn(`Using session storage. This has not yet been moved to the background script. Expect errors.`);
                 if (ISDEBUG)
                     console.debug(`globalThis.storage.local.get call with data=\`${keys}\``);
                 return tocallback(browser.storage.session.get(keys), cb);
@@ -171,7 +173,7 @@ globalThis.chrome = proxifyChrome({
             setAccessLevel: async function setAccessLevel(accessLevel, cb) {
                 console.warn(`Firefox does not support browser.storage.<area>.setAccessLevel`);
                 return;
-                
+
                 if (typeof browser.storage.session.setAccessLevel === "function" || browser.storage.session.setAccessLevel === undefined) {
                     if (!browser?.storage?.session?.setAccessLevel)
                         console.error(`browser?.storage?.session?.setAccessLevel = ${browser?.storage?.session?.setAccessLevel}`);
