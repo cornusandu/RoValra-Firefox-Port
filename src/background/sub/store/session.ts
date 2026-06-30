@@ -3,7 +3,7 @@ browser.runtime.onMessage.addListener((message, sender) => {
         return false;
     }
 
-    return handleAccess(message, sender);
+    return handleAccess(browser.storage.session.set(message.keys));
 });
 
 browser.runtime.onMessage.addListener((message, sender) => {
@@ -11,7 +11,7 @@ browser.runtime.onMessage.addListener((message, sender) => {
         return false;
     }
 
-    return handleAccess(message, sender);
+    return handleAccess(browser.storage.session.get(message.keys));
 });
 
 browser.runtime.onMessage.addListener((message, sender) => {
@@ -19,14 +19,12 @@ browser.runtime.onMessage.addListener((message, sender) => {
         return false;
     }
 
-    return handleAccess(message, sender);
+    return handleAccess(browser.storage.session.remove(message.keys));
 });
 
-async function handleAccess(message: any, sender: browser.runtime.MessageSender) {
+async function handleAccess(fn: Promise<unknown>) {
     try {
-        // ...
-
-        return void 0;
+        return await fn;
     } catch (e) {
         console.error(`Background/Sub/Store/Session/handleAccess: Unknown error type`, e);
         throw e;

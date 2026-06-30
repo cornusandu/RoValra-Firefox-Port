@@ -155,13 +155,18 @@ globalThis.chrome = proxifyChrome({
         },
         session: {
             set: async function set(data, cb) {
-                console.warn(`Using session storage. This has not yet been moved to the background script. Expect errors.`);
                 if (ISDEBUG)
                     console.debug(`globalThis.storage.local.set call with data=\`${data}\``);
-                return tocallback(browser.storage.session.set(data), cb, () => undefined);
+                if (!browser.storage.session) {
+                    const res = await browser.runtime.sendMessage({
+                        rovid: 'rovalra-setsession',
+                        keys: data
+                    });
+                    return res;
+                }
             },
             get: async function get(keys, cb) {
-                console.warn(`Using session storage. This has not yet been moved to the background script. Expect errors.`);
+                console.warn(`Using session storage (get). This has not yet been moved to the background script. Expect errors.`);
                 if (ISDEBUG)
                     console.debug(`globalThis.storage.local.get call with data=\`${keys}\``);
                 return tocallback(browser.storage.session.get(keys), cb);
